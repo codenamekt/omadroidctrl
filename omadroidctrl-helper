@@ -296,9 +296,53 @@ cmd_tcpip() {
 
 # -------------------------------------------------------------------- mirror
 
-# Geometry of the focused monitor: "x y width height reserved_top scale".
-focused_monitor() {
-  hyprctl monitors -j 2>/dev/null | jq -r '(map(select(.focused)) | .[0]) // .[0] | "\(.x) \(.y) \(.width) \(.height) \(.reserved[1]) \(.scale)"'
+# Geometry of the monitor holding window ADDRESS (or the focused one):
+# "x y width height reserved_top scale". x/y are logical layout coordinates,
+# width/height are physical pixels.
+window_monitor() {
+  local address=${1:-} mon
+  mon=$(hyprctl clients -j 2>/dev/null | jq -r --arg a "$address" '.[] | select(.address == $a) | .monitor' | head -1)
+  hyprctl monitors -j 2>/dev/null | jq -r --arg mon "${mon:-}" '
+    ((map(select(($mon != "" and (.id|tostring) == $mon))) | .[0]) // (map(select(.focused)) | .[0]) // .[0])
+    | "\(.x) \(.y) \(.width) \(.height) \(.reserved[1]) \(.scale)"'
+}
+
+# Hyprland 0.56+ takes Lua through `hyprctl repl`; older releases take the
+# classic dispatcher syntax. Both float, pin, size and place the window.
+hypr_lua() { hyprctl --help 2>/dev/null | grep -q '^\s*repl'; }
+
+hypr_dock_window() {
+  local address=$1 width=$2 height=$3 x=$4 y=$5 out
+  if hypr_lua; then
+    out=$(hyprctl repl "local w = hl.get_window('address:$address') if not w then return 'no window' end
+      if not w.floating then hl.dispatch(hl.dsp.window.float({ window = w })) end
+      if not w.pinned then hl.dispatch(hl.dsp.window.pin({ window = w })) end
+      if $height > 0 then hl.dispatch(hl.dsp.window.resize({ x = $width, y = $height, exact = true, window = w })) end
+      hl.dispatch(hl.dsp.window.move({ x = $x, y = $y, exact = true, window = w }))
+      return 'floating='..tostring(w.floating)..' pinned='..tostring(w.pinned)" 2>&1)
+  else
+    out=$(hyprctl --batch "dispatch setfloating address:$address; dispatch pin address:$address" 2>&1)
+    (( height > 0 )) && out+=$'\n'$(hyprctl dispatch resizewindowpixel exact "$width" "$height",address:"$address" 2>&1)
+    out+=$'\n'$(hyprctl dispatch movewindowpixel exact "$x" "$y",address:"$address" 2>&1)
+  fi
+  log "dock: hyprctl -> $(tr '\n' ' ' <<<"$out")"
+}
+
+hypr_undock_window() {
+  local address=$1 out
+  if hypr_lua; then
+    out=$(hyprctl repl "local w = hl.get_window('address:$address') if not w then return 'no window' end
+      if w.pinned then hl.dispatch(hl.dsp.window.pin({ window = w })) end
+      if w.floating then hl.dispatch(hl.dsp.window.float({ window = w })) end
+      return 'floating='..tostring(w.floating)..' pinned='..tostring(w.pinned)" 2>&1)
+  else
+    local pinned floating
+    read -r pinned floating < <(hyprctl clients -j | jq -r --arg a "$address" '.[] | select(.address == $a) | "\(.pinned) \(.floating)"')
+    out=""
+    [[ $pinned == true ]] && out+=$(hyprctl dispatch pin address:"$address" 2>&1)
+    [[ $floating == true ]] && out+=$'\n'$(hyprctl dispatch settiled address:"$address" 2>&1)
+  fi
+  log "undock: hyprctl -> $(tr '\n' ' ' <<<"$out")"
 }
 
 # Float, pin and park the mirror window under the bar.
@@ -306,7 +350,7 @@ apply_dock() {
   local address=$1 align=$2 width=$3
   log "dock: window $address align=$align width=$width"
   local mx my mw mh top scale
-  read -r mx my mw mh top scale < <(focused_monitor)
+  read -r mx my mw mh top scale < <(window_monitor "$address")
   # hyprctl geometry is in physical pixels; window sizes below are logical.
   local lw lh
   lw=$(awk -v w="$mw" -v s="$scale" 'BEGIN { printf "%d", w / s }')
@@ -323,12 +367,8 @@ apply_dock() {
     *) x=$(( mx + lw - width - GAP )) ;;
   esac
   local y=$(( my + top + GAP ))
-  log "dock: geometry x=$x y=$y w=$width h=$h (monitor ${mw}x${mh}@${scale}, reserved top $top)"
-  hyprctl --batch "dispatch setfloating address:$address; dispatch pin address:$address" >/dev/null 2>&1 || true
-  if (( h > 0 )); then
-    hyprctl dispatch resizewindowpixel exact "$width" "$h",address:"$address" >/dev/null 2>&1 || true
-  fi
-  hyprctl dispatch movewindowpixel exact "$x" "$y",address:"$address" >/dev/null 2>&1 || true
+  log "dock: geometry x=$x y=$y w=$width h=$h (monitor ${mw}x${mh}@${scale} at $mx,$my, reserved top $top)"
+  hypr_dock_window "$address" "$width" "$h" "$x" "$y"
 }
 
 wait_for_window() {
@@ -422,10 +462,7 @@ cmd_undock() {
   need hyprctl jq
   local address
   address=$(mirror_address) || json_error "no mirror window to pop out"
-  local pinned floating
-  read -r pinned floating < <(hyprctl clients -j | jq -r --arg a "$address" '.[] | select(.address == $a) | "\(.pinned) \(.floating)"')
-  [[ $pinned == true ]] && hyprctl dispatch pin address:"$address" >/dev/null 2>&1 || true
-  [[ $floating == true ]] && hyprctl dispatch settiled address:"$address" >/dev/null 2>&1 || true
+  hypr_undock_window "$address"
   if [[ -f $MIRROR_STATE ]]; then
     jq -c '. + {mode:"window"}' "$MIRROR_STATE" >"$MIRROR_STATE.next" && mv "$MIRROR_STATE.next" "$MIRROR_STATE"
   fi

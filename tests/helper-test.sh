@@ -80,12 +80,14 @@ STUB
 
 cat >"$sandbox/hyprctl" <<'STUB'
 #!/usr/bin/env bash
-printf 'hyprctl %s\n' "$*" >>"$STUB_LOG"
+printf 'hyprctl %s\n' "$(tr '\n' ' ' <<<"$*")" >>"$STUB_LOG"
 case $1 in
-  monitors) printf '[{"name":"DP-1","x":0,"y":0,"width":3440,"height":1440,"scale":1.25,"reserved":[0,24,0,0],"focused":true}]\n' ;;
+  --help) [[ ${HYPR_LEGACY:-} == true ]] || printf '    repl [code]         → Enter interactive Lua REPL mode\n'; printf '    dispatch <dispatcher> [args]\n' ;;
+  repl) printf 'floating=true pinned=true\n' ;;
+  monitors) printf '[{"id":0,"name":"DP-1","x":0,"y":0,"width":3440,"height":1440,"scale":1.25,"reserved":[0,24,0,0],"focused":false},{"id":1,"name":"DP-3","x":2752,"y":0,"width":2560,"height":1080,"scale":1.25,"reserved":[0,24,0,0],"focused":true}]\n' ;;
   clients)
     if [[ ${HYPR_WINDOW:-} != none ]]; then
-      printf '[{"address":"0xabc","title":"omadroidctrl","initialTitle":"omadroidctrl","class":"scrcpy","floating":%s,"pinned":%s,"size":[420,933]}]\n' "${HYPR_FLOATING:-false}" "${HYPR_PINNED:-false}"
+      printf '[{"address":"0xabc","title":"omadroidctrl","initialTitle":"omadroidctrl","class":"scrcpy","floating":%s,"pinned":%s,"size":[420,933],"monitor":0}]\n' "${HYPR_FLOATING:-false}" "${HYPR_PINNED:-false}"
     else printf '[]\n'; fi ;;
 esac
 exit 0
@@ -195,9 +197,12 @@ assert_jq '.ok == false' "$out" "tcpip fails cleanly without a device"
 out=$("$HELPER" mirror --mode docked --align right --width 420 --max-size 1080 --bit-rate 8 --stay-awake --no-audio --extra "--crop=1:2:3:4")
 assert_jq '.ok == true and .mode == "docked" and .serial == "192.168.1.20:41123" and (.pid | type) == "number"' "$out" "mirror starts scrcpy docked"
 assert_logged "scrcpy -s 192.168.1.20:41123 --window-title=omadroidctrl --max-size=1080 --video-bit-rate=8M --stay-awake --no-audio --window-borderless --always-on-top --window-width=420 --crop=1:2:3:4" "mirror builds the scrcpy command from its options"
-assert_logged "hyprctl --batch dispatch setfloating address:0xabc; dispatch pin address:0xabc" "docked mirror floats and pins the window"
-assert_logged "hyprctl dispatch resizewindowpixel exact 420 933,address:0xabc" "docked mirror keeps the phone aspect when resizing"
-assert_logged "hyprctl dispatch movewindowpixel exact 2324 32,address:0xabc" "docked mirror parks the window under the bar at the right edge"
+assert_logged "hyprctl repl local w = hl.get_window('address:0xabc')" "docked mirror drives Hyprland through the Lua REPL"
+assert_logged "hl.dsp.window.float({ window = w })" "docked mirror floats the window"
+assert_logged "hl.dsp.window.pin({ window = w })" "docked mirror pins the window"
+assert_logged "hl.dsp.window.resize({ x = 420, y = 933, exact = true, window = w })" "docked mirror keeps the phone aspect when resizing"
+assert_logged "hl.dsp.window.move({ x = 2324, y = 32, exact = true, window = w })" "docked mirror parks the window under the bar on the window's monitor, not the focused one"
+grep -q "dock: hyprctl -> floating=true pinned=true" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "dock does not log Hyprland's reply"
 status=$("$HELPER" status)
 assert_jq '.mirror.running == true and .mirror.mode == "docked"' "$status" "status sees the running mirror"
 again=$("$HELPER" mirror --mode docked)
@@ -206,13 +211,18 @@ assert_jq '.ok == true and .already == true' "$again" "a second mirror call is i
 : >"$STUB_LOG"
 out=$(HYPR_FLOATING=true HYPR_PINNED=true "$HELPER" undock)
 assert_jq '.ok == true and .mode == "window"' "$out" "undock reports window mode"
-assert_logged "hyprctl dispatch pin address:0xabc" "undock unpins"
-assert_logged "hyprctl dispatch settiled address:0xabc" "undock tiles the window"
+assert_logged "if w.pinned then hl.dispatch(hl.dsp.window.pin({ window = w })) end" "undock unpins only when pinned"
+assert_logged "if w.floating then hl.dispatch(hl.dsp.window.float({ window = w })) end" "undock tiles only when floating"
 assert_jq '.mirror.mode == "window"' "$("$HELPER" status)" "status reflects the popped-out mode"
 : >"$STUB_LOG"
 out=$("$HELPER" dock --align center --width 600)
 assert_jq '.ok == true and .mode == "docked"' "$out" "dock reports docked mode"
-assert_logged "movewindowpixel exact 1076 32,address:0xabc" "dock centers the window when asked"
+assert_logged "hl.dsp.window.move({ x = 1076, y = 32, exact = true, window = w })" "dock centers the window when asked"
+: >"$STUB_LOG"
+out=$(HYPR_LEGACY=true "$HELPER" dock --align right --width 420)
+assert_jq '.ok == true' "$out" "dock works on Hyprland without the Lua REPL"
+assert_logged "hyprctl --batch dispatch setfloating address:0xabc; dispatch pin address:0xabc" "legacy dock floats and pins with classic dispatchers"
+assert_logged "hyprctl dispatch movewindowpixel exact 2324 32,address:0xabc" "legacy dock places the window with classic dispatchers"
 
 assert_jq '.ok == true' "$("$HELPER" stop)" "stop reports ok"
 assert_jq '.mirror.running == false' "$("$HELPER" status)" "status sees the stopped mirror"

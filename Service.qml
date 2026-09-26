@@ -237,6 +237,8 @@ Item {
   }
 
   function stopMirror() {
+    // Optimistic: the Dock button must not stay enabled between stop and the next status.
+    mirror = {running: false}
     runAction([helperPath(), "stop"], "Mirror stopped")
   }
 
@@ -253,7 +255,16 @@ Item {
   }
 
   function toggleDock() {
-    if (!mirroring) return
+    if (!mirroring) {
+      // Nothing to move yet: start the mirror straight into docked mode.
+      if (mirrorProcess.running || !connected) return
+      lastError = ""
+      actionStatus = "Starting docked mirror…"
+      var argv = mirrorArgs()
+      argv[argv.indexOf("--mode") + 1] = "docked"
+      run(mirrorProcess, argv, "mirror")
+      return
+    }
     if (docked) undock(); else dock()
   }
 
