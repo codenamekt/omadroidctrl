@@ -207,7 +207,7 @@ Panel {
             width: parent.width
             visible: phone.ready && !phone.pairing
             text: phone.mirroring ? "Stop mirror" : "Mirror in a window"
-            iconText: phone.mirroring ? "󰄛" : "󰐊"
+            iconText: "󰀲"
             tooltipText: (phone.mirroring ? "Stop scrcpy" : "Start scrcpy in its own window") + "  m"
             enabled: phone.mirroring || phone.connected
             selected: phone.mirroring
