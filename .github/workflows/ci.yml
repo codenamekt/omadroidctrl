@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends jq
+      - name: Validate manifest
+        run: tests/manifest-test.sh
+      - name: Helper tests
+        run: tests/helper-test.sh
+      - name: Panel and service source tests
+        run: tests/source-test.sh

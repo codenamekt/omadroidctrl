@@ -1,0 +1,424 @@
+#!/usr/bin/env bash
+# omadroidctrl helper: everything that touches adb, scrcpy, mDNS and Hyprland.
+#
+# The QML side never shells out on its own; it runs this script and reads
+# JSON. Long-running commands (pair, connect) stream one JSON event per line so
+# the panel can show progress. Everything else prints a single JSON object.
+#
+#   omadroidctrl-helper status  [--tailnet-host H] [--tailnet-port P] [--lan-timeout S]
+#   omadroidctrl-helper pair    [--timeout S]
+#   omadroidctrl-helper connect [--target host:port] [--timeout S]
+#   omadroidctrl-helper disconnect [serial]
+#   omadroidctrl-helper tcpip   [--port 5555]
+#   omadroidctrl-helper mirror  --mode docked|window [--align right|center|left]
+#                               [--width PX] [--max-size N] [--bit-rate MBPS]
+#                               [--turn-screen-off] [--stay-awake] [--show-touches]
+#                               [--no-audio] [--extra "ARGS"] [--serial S]
+#   omadroidctrl-helper dock | undock | stop
+set -euo pipefail
+
+WINDOW_TITLE="omadroidctrl"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omadroidctrl"
+MIRROR_STATE="$STATE_DIR/mirror.json"
+PAIR_PNG="$STATE_DIR/pair.png"
+GAP=8
+
+mkdir -p "$STATE_DIR"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+json_error() {
+  jq -cn --arg error "$1" '{ok:false,error:$error}'
+  exit 1
+}
+
+event() {
+  # event NAME [jq-args...]  -> one JSON line with "event": NAME
+  local name=$1; shift
+  jq -cn --arg event "$name" "$@" '{event:$event} + $ARGS.named'
+}
+
+need() {
+  for tool in "$@"; do have "$tool" || json_error "$tool is not installed"; done
+}
+
+# ------------------------------------------------------------------ discovery
+
+# Print "host port name" for every IPv4 instance of an adb mDNS service type.
+browse() {
+  local type=$1
+  have avahi-browse || return 0
+  timeout 3 avahi-browse -rpt "$type" 2>/dev/null \
+    | awk -F';' '$1=="=" && $3=="IPv4" && $8 != "" && $9 != "" { print $8, $9, $4 }' \
+    | sort -u || true
+}
+
+browse_json() {
+  browse "$1" | jq -Rc 'split(" ") | select(length >= 3) | {host:.[0], port:(.[1]|tonumber), name:(.[2:]|join(" "))}' | jq -sc '.'
+}
+
+# --------------------------------------------------------------------- state
+
+mirror_pid() {
+  [[ -f $MIRROR_STATE ]] || return 1
+  local pid
+  pid=$(jq -r '.pid // empty' "$MIRROR_STATE" 2>/dev/null) || return 1
+  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+}
+
+mirror_json() {
+  local pid
+  if pid=$(mirror_pid); then
+    jq -c --argjson pid "$pid" '. + {running:true, pid:$pid}' "$MIRROR_STATE"
+  else
+    rm -f "$MIRROR_STATE"
+    printf '{"running":false}\n'
+  fi
+}
+
+# Hyprland client address for the mirror window, if it is mapped.
+mirror_address() {
+  have hyprctl || return 1
+  hyprctl clients -j 2>/dev/null | jq -r --arg t "$WINDOW_TITLE" '.[] | select(.title == $t or .initialTitle == $t) | .address' | head -1 | grep . || return 1
+}
+
+# ----------------------------------------------------------------------- adb
+
+devices_json() {
+  have adb || { printf '[]\n'; return; }
+  adb devices -l 2>/dev/null | awk 'NR > 1 && NF >= 2 { print }' | while read -r serial state rest; do
+    local model
+    model=$(printf '%s\n' "$rest" | grep -o 'model:[^ ]*' | cut -d: -f2 | tr '_' ' ')
+    local wireless=false
+    [[ $serial == *:* ]] && wireless=true
+    jq -cn --arg serial "$serial" --arg state "$state" --arg model "$model" --argjson wireless "$wireless" \
+      '{serial:$serial,state:$state,model:$model,wireless:$wireless}'
+  done | jq -sc '.'
+}
+
+active_serial() {
+  # First ready device, preferring wireless ones; explicit --serial wins upstream.
+  devices_json | jq -r '[.[] | select(.state == "device")] | sort_by(.wireless | not) | .[0].serial // empty'
+}
+
+# -------------------------------------------------------------------- status
+
+cmd_status() {
+  local tailnet_host="" tailnet_port=5555 lan_timeout=3
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --tailnet-host) tailnet_host=$2; shift 2 ;;
+      --tailnet-port) tailnet_port=$2; shift 2 ;;
+      --lan-timeout) lan_timeout=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  have jq || { printf '{"ok":false,"error":"jq is not installed"}\n'; exit 1; }
+  local deps devices connect pairing mirror
+  deps=$(jq -cn \
+    --argjson adb "$(have adb && echo true || echo false)" \
+    --argjson scrcpy "$(have scrcpy && echo true || echo false)" \
+    --argjson avahi "$(have avahi-browse && echo true || echo false)" \
+    --argjson qrencode "$(have qrencode && echo true || echo false)" \
+    --argjson hyprctl "$(have hyprctl && echo true || echo false)" \
+    '{adb:$adb,scrcpy:$scrcpy,avahi:$avahi,qrencode:$qrencode,hyprctl:$hyprctl}')
+  devices=$(devices_json)
+  connect=$(browse_json _adb-tls-connect._tcp)
+  pairing=$(browse_json _adb-tls-pairing._tcp)
+  mirror=$(mirror_json)
+  local paired=false
+  [[ -s ${ANDROID_USER_HOME:-$HOME/.android}/adbkey ]] && paired=true
+  jq -cn \
+    --argjson deps "$deps" --argjson devices "$devices" --argjson connect "$connect" \
+    --argjson pairing "$pairing" --argjson mirror "$mirror" --argjson paired "$paired" \
+    --arg tailnetHost "$tailnet_host" --argjson tailnetPort "$tailnet_port" \
+    '{
+      schemaVersion: 1,
+      deps: $deps,
+      devices: $devices,
+      active: ([$devices[] | select(.state == "device")] | sort_by(.wireless | not) | .[0] // null),
+      lan: {connect: $connect, pairing: $pairing},
+      mirror: $mirror,
+      hostKey: $paired,
+      tailnet: {host: $tailnetHost, port: $tailnetPort}
+    }'
+}
+
+# ---------------------------------------------------------------------- pair
+
+cmd_pair() {
+  local timeout_s=120
+  while [[ $# -gt 0 ]]; do
+    case $1 in --timeout) timeout_s=$2; shift 2 ;; *) shift ;; esac
+  done
+  need adb avahi-browse qrencode jq
+  # The panel cancels pairing with SIGTERM; never leave a stale code behind.
+  trap 'rm -f "$PAIR_PNG"' EXIT
+  local suffix name code
+  # Read a bounded chunk first: an unbounded tr over /dev/urandom dies of
+  # SIGPIPE when head closes, which pipefail turns into a silent exit.
+  suffix=$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'a-z0-9' | cut -c1-6)
+  name="omadroidctrl-$suffix"
+  code=$(printf '%06d' "$(( (RANDOM * 32768 + RANDOM) % 1000000 ))")
+  qrencode -s 8 -m 2 -t PNG -o "$PAIR_PNG" "WIFI:T:ADB;S:$name;P:$code;;"
+  event qr --arg qrPath "$PAIR_PNG" --arg name "$name" --arg code "$code" --argjson timeout "$timeout_s"
+
+  local deadline=$(( $(date +%s) + timeout_s )) line host port
+  while :; do
+    line=$(browse _adb-tls-pairing._tcp | awk -v n="$name" '$3 == n { print; exit }') || true
+    if [[ -n $line ]]; then
+      host=$(cut -d' ' -f1 <<<"$line"); port=$(cut -d' ' -f2 <<<"$line")
+      break
+    fi
+    if (( $(date +%s) >= deadline )); then
+      rm -f "$PAIR_PNG"
+      event timeout --arg message "No phone scanned the code within ${timeout_s}s"
+      exit 0
+    fi
+    sleep 1
+  done
+  event pairing --arg host "$host" --argjson port "$port"
+  local out
+  if ! out=$(adb pair "$host:$port" "$code" 2>&1); then
+    rm -f "$PAIR_PNG"
+    event error --arg message "adb pair failed: $(tr '\n' ' ' <<<"$out")"
+    exit 0
+  fi
+  rm -f "$PAIR_PNG"
+  event paired --arg host "$host" --argjson port "$port"
+  connect_lan "$host" 20 || true
+}
+
+# ------------------------------------------------------------------- connect
+
+# Discover _adb-tls-connect on the LAN (optionally only for HOST) and connect.
+connect_lan() {
+  local want_host=${1:-} timeout_s=${2:-8}
+  local deadline=$(( $(date +%s) + timeout_s )) line host port out
+  while :; do
+    line=$(browse _adb-tls-connect._tcp | awk -v h="$want_host" 'h == "" || $1 == h { print; exit }') || true
+    if [[ -n $line ]]; then
+      host=$(cut -d' ' -f1 <<<"$line"); port=$(cut -d' ' -f2 <<<"$line")
+      if out=$(adb connect "$host:$port" 2>&1) && grep -qi "connected" <<<"$out" && ! grep -qi "failed\|cannot" <<<"$out"; then
+        event connected --arg serial "$host:$port" --arg message "$(tr '\n' ' ' <<<"$out")"
+        return 0
+      fi
+      event error --arg message "adb connect $host:$port: $(tr '\n' ' ' <<<"$out")"
+      return 1
+    fi
+    if (( $(date +%s) >= deadline )); then
+      event timeout --arg message "No phone advertising wireless debugging on this network"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+cmd_connect() {
+  local target="" timeout_s=8
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --target) target=$2; shift 2 ;;
+      --timeout) timeout_s=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  need adb jq
+  if [[ -n $target ]]; then
+    [[ $target == *:* ]] || target="$target:5555"
+    local out
+    if out=$(timeout 15 adb connect "$target" 2>&1) && grep -qi "connected" <<<"$out" && ! grep -qi "failed\|cannot\|unable" <<<"$out"; then
+      event connected --arg serial "$target" --arg message "$(tr '\n' ' ' <<<"$out")"
+    else
+      event error --arg message "adb connect $target: $(tr '\n' ' ' <<<"${out:-timed out}")"
+    fi
+    return 0
+  fi
+  need avahi-browse
+  connect_lan "" "$timeout_s" || true
+}
+
+cmd_disconnect() {
+  need adb jq
+  local serial=${1:-}
+  if [[ -n $serial ]]; then adb disconnect "$serial" >/dev/null 2>&1 || true
+  else adb disconnect >/dev/null 2>&1 || true
+  fi
+  jq -cn '{ok:true}'
+}
+
+cmd_tcpip() {
+  local port=5555 serial=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in --port) port=$2; shift 2 ;; --serial) serial=$2; shift 2 ;; *) shift ;; esac
+  done
+  need adb jq
+  [[ -n $serial ]] || serial=$(active_serial)
+  [[ -n $serial ]] || json_error "no connected device to switch to tcpip mode"
+  local out
+  if out=$(adb -s "$serial" tcpip "$port" 2>&1); then
+    jq -cn --arg message "$(tr '\n' ' ' <<<"$out")" --argjson port "$port" '{ok:true,port:$port,message:$message}'
+  else
+    json_error "adb tcpip failed: $(tr '\n' ' ' <<<"$out")"
+  fi
+}
+
+# -------------------------------------------------------------------- mirror
+
+# Geometry of the focused monitor: "x y width height reserved_top scale".
+focused_monitor() {
+  hyprctl monitors -j 2>/dev/null | jq -r '(map(select(.focused)) | .[0]) // .[0] | "\(.x) \(.y) \(.width) \(.height) \(.reserved[1]) \(.scale)"'
+}
+
+# Float, pin and park the mirror window under the bar.
+apply_dock() {
+  local address=$1 align=$2 width=$3
+  local mx my mw mh top scale
+  read -r mx my mw mh top scale < <(focused_monitor)
+  # hyprctl geometry is in physical pixels; window sizes below are logical.
+  local lw lh
+  lw=$(awk -v w="$mw" -v s="$scale" 'BEGIN { printf "%d", w / s }')
+  local wh
+  wh=$(hyprctl clients -j | jq -r --arg a "$address" '.[] | select(.address == $a) | "\(.size[0]) \(.size[1])"')
+  local cur_w cur_h
+  read -r cur_w cur_h <<<"${wh:-0 0}"
+  local h=0
+  if (( cur_w > 0 && cur_h > 0 )); then h=$(( width * cur_h / cur_w )); fi
+  local x
+  case $align in
+    left) x=$(( mx + GAP )) ;;
+    center) x=$(( mx + (lw - width) / 2 )) ;;
+    *) x=$(( mx + lw - width - GAP )) ;;
+  esac
+  local y=$(( my + top + GAP ))
+  hyprctl --batch "dispatch setfloating address:$address; dispatch pin address:$address" >/dev/null 2>&1 || true
+  if (( h > 0 )); then
+    hyprctl dispatch resizewindowpixel exact "$width" "$h",address:"$address" >/dev/null 2>&1 || true
+  fi
+  hyprctl dispatch movewindowpixel exact "$x" "$y",address:"$address" >/dev/null 2>&1 || true
+}
+
+wait_for_window() {
+  local tries=${1:-40} address
+  while (( tries-- > 0 )); do
+    if address=$(mirror_address); then printf '%s\n' "$address"; return 0; fi
+    sleep 0.25
+  done
+  return 1
+}
+
+cmd_mirror() {
+  local mode=docked align=right width=420 max_size=0 bit_rate=0 serial="" extra=""
+  local screen_off=false stay_awake=false show_touches=false no_audio=false
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --mode) mode=$2; shift 2 ;;
+      --align) align=$2; shift 2 ;;
+      --width) width=$2; shift 2 ;;
+      --max-size) max_size=$2; shift 2 ;;
+      --bit-rate) bit_rate=$2; shift 2 ;;
+      --serial) serial=$2; shift 2 ;;
+      --extra) extra=$2; shift 2 ;;
+      --turn-screen-off) screen_off=true; shift ;;
+      --stay-awake) stay_awake=true; shift ;;
+      --show-touches) show_touches=true; shift ;;
+      --no-audio) no_audio=true; shift ;;
+      *) shift ;;
+    esac
+  done
+  need adb scrcpy jq
+  if mirror_pid >/dev/null; then
+    jq -c '. + {ok:true, already:true}' <(mirror_json)
+    return 0
+  fi
+  [[ -n $serial ]] || serial=$(active_serial)
+  [[ -n $serial ]] || json_error "no connected device to mirror"
+
+  local -a argv=(scrcpy -s "$serial" "--window-title=$WINDOW_TITLE")
+  (( max_size > 0 )) && argv+=("--max-size=$max_size")
+  (( bit_rate > 0 )) && argv+=("--video-bit-rate=${bit_rate}M")
+  [[ $screen_off == true ]] && argv+=(--turn-screen-off)
+  [[ $stay_awake == true ]] && argv+=(--stay-awake)
+  [[ $show_touches == true ]] && argv+=(--show-touches)
+  [[ $no_audio == true ]] && argv+=(--no-audio)
+  if [[ $mode == docked ]]; then
+    argv+=(--window-borderless --always-on-top "--window-width=$width")
+  fi
+  if [[ -n $extra ]]; then
+    # shellcheck disable=SC2206
+    local -a extra_args=($extra)
+    argv+=("${extra_args[@]}")
+  fi
+
+  setsid "${argv[@]}" >"$STATE_DIR/scrcpy.log" 2>&1 < /dev/null &
+  local pid=$!
+  jq -cn --argjson pid "$pid" --arg mode "$mode" --arg align "$align" --argjson width "$width" --arg serial "$serial" \
+    '{pid:$pid,mode:$mode,align:$align,width:$width,serial:$serial}' >"$MIRROR_STATE"
+
+  if [[ $mode == docked ]] && have hyprctl; then
+    local address
+    if address=$(wait_for_window 40); then apply_dock "$address" "$align" "$width"; fi
+  fi
+  sleep 0.5
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$MIRROR_STATE"
+    json_error "scrcpy exited: $(tail -n 3 "$STATE_DIR/scrcpy.log" 2>/dev/null | tr '\n' ' ')"
+  fi
+  jq -cn --argjson pid "$pid" --arg mode "$mode" --arg serial "$serial" '{ok:true,pid:$pid,mode:$mode,serial:$serial}'
+}
+
+cmd_dock() {
+  need hyprctl jq
+  local align=right width=420
+  while [[ $# -gt 0 ]]; do
+    case $1 in --align) align=$2; shift 2 ;; --width) width=$2; shift 2 ;; *) shift ;; esac
+  done
+  local address
+  address=$(mirror_address) || json_error "no mirror window to dock"
+  apply_dock "$address" "$align" "$width"
+  if [[ -f $MIRROR_STATE ]]; then
+    jq -c --arg align "$align" --argjson width "$width" '. + {mode:"docked",align:$align,width:$width}' "$MIRROR_STATE" >"$MIRROR_STATE.next" && mv "$MIRROR_STATE.next" "$MIRROR_STATE"
+  fi
+  jq -cn '{ok:true,mode:"docked"}'
+}
+
+cmd_undock() {
+  need hyprctl jq
+  local address
+  address=$(mirror_address) || json_error "no mirror window to pop out"
+  local pinned floating
+  read -r pinned floating < <(hyprctl clients -j | jq -r --arg a "$address" '.[] | select(.address == $a) | "\(.pinned) \(.floating)"')
+  [[ $pinned == true ]] && hyprctl dispatch pin address:"$address" >/dev/null 2>&1 || true
+  [[ $floating == true ]] && hyprctl dispatch settiled address:"$address" >/dev/null 2>&1 || true
+  if [[ -f $MIRROR_STATE ]]; then
+    jq -c '. + {mode:"window"}' "$MIRROR_STATE" >"$MIRROR_STATE.next" && mv "$MIRROR_STATE.next" "$MIRROR_STATE"
+  fi
+  jq -cn '{ok:true,mode:"window"}'
+}
+
+cmd_stop() {
+  need jq
+  local pid
+  if pid=$(mirror_pid); then kill "$pid" 2>/dev/null || true; fi
+  pkill -f "scrcpy.*--window-title=$WINDOW_TITLE" 2>/dev/null || true
+  rm -f "$MIRROR_STATE"
+  jq -cn '{ok:true}'
+}
+
+# ---------------------------------------------------------------------- main
+
+cmd=${1:-}
+[[ -n $cmd ]] || { sed -n 2,20p "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+shift
+case $cmd in
+  status) cmd_status "$@" ;;
+  pair) cmd_pair "$@" ;;
+  connect) cmd_connect "$@" ;;
+  disconnect) cmd_disconnect "$@" ;;
+  tcpip) cmd_tcpip "$@" ;;
+  mirror) cmd_mirror "$@" ;;
+  dock) cmd_dock "$@" ;;
+  undock) cmd_undock "$@" ;;
+  stop) cmd_stop "$@" ;;
+  *) json_error "unknown command: $cmd" ;;
+esac

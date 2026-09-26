@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "codenamekt.omadroidctrl",
+  "name": "omadroidctrl",
+  "version": "0.1.0",
+  "author": "Toby Stevenson",
+  "license": "MIT",
+  "description": "Pair your Android phone with a QR code and mirror it under the bar or in its own window, over Wi-Fi or your tailnet.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "omadroidctrl",
+    "description": "Android phone control: QR pairing, wireless adb connect, scrcpy mirroring docked under the bar or popped out into its own window.",
+    "category": "Development",
+    "aliases": ["android", "phone", "scrcpy", "adb", "mirror"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30,
+      "mirrorMode": "Docked",
+      "dockAlign": "Right",
+      "dockWidth": 420,
+      "maxSize": 1080,
+      "bitRateMbps": 8,
+      "turnScreenOff": false,
+      "stayAwake": true,
+      "showTouches": false,
+      "audio": true,
+      "extraArgs": "",
+      "tailnetHost": "",
+      "tailnetPort": 5555,
+      "autoMirror": true,
+      "lanTimeoutSec": 8,
+      "pairTimeoutSec": 120
+    },
+    "schema": [
+      { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 5, "max": 600, "step": 5, "defaultValue": 30 },
+      { "key": "mirrorMode", "type": "enum", "label": "Mirror opens as", "options": ["Docked", "Window"], "defaultValue": "Docked", "description": "Docked parks a borderless, always-on-top mirror under the bar. Window opens a normal window you can tile or float." },
+      { "key": "dockAlign", "type": "enum", "label": "Docked position", "options": ["Right", "Center", "Left"], "defaultValue": "Right" },
+      { "key": "dockWidth", "type": "integer", "label": "Docked width (px)", "min": 200, "max": 1200, "step": 20, "defaultValue": 420 },
+      { "key": "maxSize", "type": "integer", "label": "Max video size (px, 0 = native)", "min": 0, "max": 2160, "step": 120, "defaultValue": 1080 },
+      { "key": "bitRateMbps", "type": "integer", "label": "Video bit rate (Mbps, 0 = scrcpy default)", "min": 0, "max": 40, "step": 1, "defaultValue": 8 },
+      { "key": "turnScreenOff", "type": "boolean", "label": "Turn the phone screen off while mirroring", "defaultValue": false },
+      { "key": "stayAwake", "type": "boolean", "label": "Keep the phone awake while mirroring", "defaultValue": true },
+      { "key": "showTouches", "type": "boolean", "label": "Show touches", "defaultValue": false },
+      { "key": "audio", "type": "boolean", "label": "Forward audio", "defaultValue": true },
+      { "key": "extraArgs", "type": "string", "label": "Extra scrcpy arguments", "defaultValue": "" },
+      { "key": "tailnetHost", "type": "string", "label": "Tailnet host (MagicDNS name or 100.x IP)", "defaultValue": "", "description": "Used by Connect via tailnet. The phone must be in adb tcpip mode; use Enable tailnet mode once per phone reboot." },
+      { "key": "tailnetPort", "type": "integer", "label": "Tailnet adb port", "min": 1024, "max": 65535, "step": 1, "defaultValue": 5555 },
+      { "key": "autoMirror", "type": "boolean", "label": "Start mirroring right after connecting", "defaultValue": true },
+      { "key": "lanTimeoutSec", "type": "integer", "label": "LAN discovery timeout (seconds)", "min": 2, "max": 60, "step": 1, "defaultValue": 8 },
+      { "key": "pairTimeoutSec", "type": "integer", "label": "QR pairing timeout (seconds)", "min": 30, "max": 600, "step": 30, "defaultValue": 120 }
+    ]
+  }
+}
