@@ -14,6 +14,7 @@
 #                               [--width PX] [--max-size N] [--bit-rate MBPS]
 #                               [--turn-screen-off] [--stay-awake] [--show-touches]
 #                               [--no-audio] [--extra "ARGS"] [--serial S]
+#   omadroidctrl-helper install   (missing packages + avahi-daemon, in a terminal)
 #   omadroidctrl-helper dock | undock | stop | log [N]
 #
 # Everything is logged to $XDG_STATE_HOME/omadroidctrl/helper.log.
@@ -55,6 +56,24 @@ event() {
 
 need() {
   for tool in "$@"; do have "$tool" || json_error "$tool is not installed"; done
+}
+
+# Arch packages behind the commands this helper uses, one per line, missing ones only.
+missing_packages() {
+  local cmd pkg
+  for pair in jq:jq adb:android-tools scrcpy:scrcpy avahi-browse:avahi qrencode:qrencode; do
+    cmd=${pair%%:*} pkg=${pair#*:}
+    have "$cmd" || printf '%s\n' "$pkg"
+  done
+}
+
+avahi_daemon_active() { systemctl is-active --quiet avahi-daemon.service 2>/dev/null; }
+
+# Built by hand: this must work before jq is installed.
+json_strings() {
+  local out="" item
+  for item in "$@"; do out+="${out:+,}\"$item\""; done
+  printf '[%s]' "$out"
 }
 
 # ------------------------------------------------------------------ discovery
@@ -131,7 +150,9 @@ cmd_status() {
       *) shift ;;
     esac
   done
-  have jq || { printf '{"ok":false,"error":"jq is not installed"}\n'; exit 1; }
+  local missing
+  mapfile -t missing < <(missing_packages)
+  have jq || { printf '{"ok":false,"error":"jq is not installed","missing":%s}\n' "$(json_strings "${missing[@]}")"; exit 1; }
   local deps devices connect pairing mirror
   deps=$(jq -cn \
     --argjson adb "$(have adb && echo true || echo false)" \
@@ -139,7 +160,8 @@ cmd_status() {
     --argjson avahi "$(have avahi-browse && echo true || echo false)" \
     --argjson qrencode "$(have qrencode && echo true || echo false)" \
     --argjson hyprctl "$(have hyprctl && echo true || echo false)" \
-    '{adb:$adb,scrcpy:$scrcpy,avahi:$avahi,qrencode:$qrencode,hyprctl:$hyprctl}')
+    --argjson avahiDaemon "$(avahi_daemon_active && echo true || echo false)" \
+    '{adb:$adb,scrcpy:$scrcpy,avahi:$avahi,qrencode:$qrencode,hyprctl:$hyprctl,avahiDaemon:$avahiDaemon}')
   devices=$(devices_json)
   connect=$(browse_json _adb-tls-connect._tcp)
   pairing=$(browse_json _adb-tls-pairing._tcp)
@@ -149,10 +171,12 @@ cmd_status() {
   jq -cn \
     --argjson deps "$deps" --argjson devices "$devices" --argjson connect "$connect" \
     --argjson pairing "$pairing" --argjson mirror "$mirror" --argjson paired "$paired" \
+    --argjson missing "$(json_strings "${missing[@]}")" \
     --arg tailnetHost "$tailnet_host" --argjson tailnetPort "$tailnet_port" \
     '{
       schemaVersion: 1,
       deps: $deps,
+      missing: $missing,
       devices: $devices,
       active: ([$devices[] | select(.state == "device")] | sort_by(.wireless | not) | .[0] // null),
       lan: {connect: $connect, pairing: $pairing},
@@ -485,6 +509,31 @@ cmd_stop() {
   jq -cn '{ok:true}'
 }
 
+# Install what is missing in a floating terminal, where sudo can prompt. The
+# panel's status polling notices when it is done. No jq: it may be what is missing.
+cmd_install() {
+  local pkgs steps=()
+  mapfile -t pkgs < <(missing_packages)
+  (( ${#pkgs[@]} )) && steps+=("omarchy-pkg-add ${pkgs[*]}")
+  avahi_daemon_active || steps+=("sudo systemctl enable --now avahi-daemon.service")
+  if (( ${#steps[@]} == 0 )); then
+    printf '{"ok":true,"launched":false}\n'
+    return
+  fi
+  local launcher=omarchy-launch-floating-terminal-with-presentation
+  if ! have "$launcher"; then
+    log "error: $launcher not found"
+    printf '{"ok":false,"error":"%s not found; run: %s"}\n' "$launcher" "${steps[*]}"
+    exit 1
+  fi
+  local script
+  script=$(printf '%s && ' "${steps[@]}")
+  script=${script% && }
+  log "install: $script"
+  setsid -f "$launcher" "$script" >/dev/null 2>&1
+  printf '{"ok":true,"launched":true,"steps":%s}\n' "$(json_strings "${steps[@]}")"
+}
+
 # ---------------------------------------------------------------------- main
 
 cmd=${1:-}
@@ -502,5 +551,6 @@ case $cmd in
   dock) cmd_dock "$@" ;;
   undock) cmd_undock "$@" ;;
   stop) cmd_stop "$@" ;;
+  install) cmd_install "$@" ;;
   *) json_error "unknown command: $cmd" ;;
 esac

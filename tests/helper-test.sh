@@ -92,7 +92,17 @@ case $1 in
 esac
 exit 0
 STUB
-chmod +x "$sandbox"/{adb,avahi-browse,qrencode,scrcpy,hyprctl}
+cat >"$sandbox/systemctl" <<'STUB'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$STUB_LOG"
+[[ ${AVAHI_DAEMON:-} == active ]]
+STUB
+
+cat >"$sandbox/omarchy-launch-floating-terminal-with-presentation" <<'STUB'
+#!/usr/bin/env bash
+printf 'launch %s\n' "$*" >>"$STUB_LOG"
+STUB
+chmod +x "$sandbox"/{adb,avahi-browse,qrencode,scrcpy,hyprctl,systemctl,omarchy-launch-floating-terminal-with-presentation}
 export PATH="$sandbox:$PATH"
 
 # ----------------------------------------------------------------- status
@@ -105,6 +115,7 @@ assert_jq '.lan.connect | length == 1 and .[0].host == "192.168.1.20" and .[0].p
 assert_jq '.mirror.running == false' "$out" "status reports no mirror"
 assert_jq '.hostKey == false' "$out" "status reports no adb host key yet"
 assert_jq '.tailnet.host == "pixel" and .tailnet.port == 5555' "$out" "status echoes the tailnet target"
+assert_jq '.missing == [] and .deps.avahiDaemon == false' "$out" "status reports missing packages and the avahi daemon"
 [[ -f "$XDG_STATE_HOME/omadroidctrl/helper.log" ]] || fail "helper does not write its log file"
 grep -q "run: status --tailnet-host pixel" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record the command"
 grep -q "avahi _adb-tls-connect._tcp: 1 resolved" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record mDNS results"
@@ -251,5 +262,16 @@ out=$(PATH="$sandbox/minimal" "$HELPER" status 2>/dev/null || true)
 assert_jq '.deps.adb == false and .deps.scrcpy == false and (.devices | length == 0)' "$out" "status degrades gracefully without adb or scrcpy"
 out=$(PATH="$sandbox/minimal" "$HELPER" pair 2>/dev/null || true)
 assert_jq '.ok == false and (.error | test("not installed"))' "$out" "pair fails cleanly when a tool is missing"
+
+
+# ---------------------------------------------------------------- install
+
+out=$(AVAHI_DAEMON=active "$HELPER" install)
+assert_jq '.ok and .launched == false' "$out" "install does nothing when everything is set up"
+
+out=$("$HELPER" install)
+assert_jq '.ok and .launched and .steps == ["sudo systemctl enable --now avahi-daemon.service"]' "$out" "install enables a stopped avahi-daemon"
+for _ in $(seq 20); do grep -q '^launch ' "$STUB_LOG" && break; sleep 0.1; done
+assert_logged "launch sudo systemctl enable --now avahi-daemon.service" "install runs its steps in a floating terminal"
 
 echo "helper tests passed"

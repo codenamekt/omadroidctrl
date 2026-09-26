@@ -52,9 +52,13 @@ Still frames:
 ## Install
 
 ```bash
-omarchy pkg add android-tools scrcpy avahi qrencode   # adb, scrcpy, mDNS, QR
+omarchy pkg add android-tools scrcpy avahi qrencode jq   # adb, scrcpy, mDNS, QR, JSON
 omarchy plugin add https://github.com/codenamekt/omadroidctrl --enable
 ```
+
+Skipped the first line? The panel's **Setup** section lists what is missing and
+**Install missing packages** runs `omarchy pkg add` (and enables `avahi-daemon`)
+in a floating terminal.
 
 The widget appears at the right of the bar. Move it with
 `omarchy bar move codenamekt.omadroidctrl --section center`.

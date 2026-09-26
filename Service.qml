@@ -14,7 +14,8 @@ Item {
   // status
   property bool refreshing: false
   property bool statusLoaded: false
-  property var deps: ({adb: false, scrcpy: false, avahi: false, qrencode: false, hyprctl: false})
+  property var deps: ({adb: false, scrcpy: false, avahi: false, qrencode: false, hyprctl: false, avahiDaemon: false})
+  property var missing: []          // Arch packages the helper needs that are not installed
   property var devices: []
   property var active: null
   property var lanConnect: []
@@ -41,6 +42,7 @@ Item {
   readonly property string tailnetHost: String(setting("tailnetHost", "")).trim()
   readonly property int tailnetPort: intSetting("tailnetPort", 5555, 1024, 65535)
   readonly property bool ready: deps.adb && deps.scrcpy
+  readonly property bool setupNeeded: missing.length > 0 || !deps.avahiDaemon
   readonly property string logPath: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omadroidctrl/helper.log"
   readonly property string deviceLabel: {
     if (!connected) return "No phone connected"
@@ -49,6 +51,7 @@ Item {
   }
   readonly property string stateText: {
     if (!statusLoaded) return "Checking…"
+    if (missing.indexOf("jq") >= 0) return "jq not installed"
     if (!deps.adb) return "adb not installed"
     if (!deps.scrcpy) return "scrcpy not installed"
     if (pairing) {
@@ -108,6 +111,7 @@ Item {
   function applyStatus(data) {
     if (!data || typeof data !== "object") return
     deps = data.deps || deps
+    missing = Array.isArray(data.missing) ? data.missing : []
     devices = Array.isArray(data.devices) ? data.devices : []
     active = data.active || null
     lanConnect = data.lan && Array.isArray(data.lan.connect) ? data.lan.connect : []
@@ -208,6 +212,12 @@ Item {
     run(actionProcess, argv, "action")
   }
 
+  // ------------------------------------------------------------ install
+
+  function installDeps() {
+    runAction([helperPath(), "install"], "Installing in a terminal; this panel updates when it is done")
+  }
+
   // ------------------------------------------------------------- mirror
 
   function mirrorArgs() {
@@ -258,6 +268,7 @@ Item {
         root.statusLoaded = true
         var err = String(statusStderr.text || "").trim()
         if (data && data.error) err = String(data.error)
+        if (data && Array.isArray(data.missing)) root.missing = data.missing
         if (err !== "") root.lastError = err
       }
     }

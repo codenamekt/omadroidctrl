@@ -144,6 +144,7 @@ Panel {
         else if (k === "t") phone.connectTailnet()
         else if (k === "d") phone.disconnect()
         else if (k === "r") phone.refresh()
+        else if (k === "i" && phone.setupNeeded) phone.installDeps()
         else if (k === "s") root.showSettings(true)
       }
 
@@ -220,20 +221,29 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.space(6)
-            visible: phone.statusLoaded && !phone.ready
+            visible: phone.statusLoaded && phone.setupNeeded
 
             PanelSectionHeader { width: parent.width; text: "Setup"; foreground: root.foreground; fontFamily: root.fontFamily }
             Text {
               width: parent.width
-              text: "Install what is missing, then reopen this panel:" +
-                    (phone.deps.adb ? "" : "\n  omarchy pkg add android-tools") +
-                    (phone.deps.scrcpy ? "" : "\n  omarchy pkg add scrcpy") +
-                    (phone.deps.avahi ? "" : "\n  omarchy pkg add avahi   (LAN discovery)") +
-                    (phone.deps.qrencode ? "" : "\n  omarchy pkg add qrencode   (QR pairing)")
+              text: (phone.missing.length > 0 ? "Missing packages: " + phone.missing.join(", ") : "") +
+                    (phone.missing.length > 0 && !phone.deps.avahiDaemon ? "\n" : "") +
+                    (phone.deps.avahiDaemon ? "" : "avahi-daemon is not running (needed for Wi-Fi discovery)")
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
+            }
+            Button {
+              width: parent.width
+              leftAlign: true
+              text: phone.missing.length > 0 ? "Install missing packages" : "Start avahi-daemon"
+              iconText: "󰏗"
+              tooltipText: "Open a terminal that runs omarchy pkg add and enables avahi-daemon  i"
+              enabled: !phone.busy
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: phone.installDeps()
             }
           }
 
