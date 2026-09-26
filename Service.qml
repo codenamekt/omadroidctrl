@@ -43,6 +43,7 @@ Item {
   readonly property string tailnetHost: String(setting("tailnetHost", "")).trim()
   readonly property int tailnetPort: intSetting("tailnetPort", 5555, 1024, 65535)
   readonly property bool ready: deps.adb && deps.scrcpy
+  readonly property string logPath: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/omadroidctrl/helper.log"
   readonly property string deviceLabel: {
     if (!connected) return "No phone connected"
     var model = String(active.model || "").trim()
@@ -86,6 +87,15 @@ Item {
   function parseJson(text) {
     try { return JSON.parse(text) } catch (e) { return null }
   }
+  // Goes to the shell's journal: journalctl --user -f | grep omadroidctrl
+  function logLine(message) {
+    console.log("omadroidctrl: " + message)
+  }
+  function run(process, argv, label) {
+    logLine(label + ": " + argv.slice(1).join(" "))
+    process.command = argv
+    process.running = true
+  }
 
   // ------------------------------------------------------------- status
 
@@ -94,8 +104,7 @@ Item {
     refreshing = true
     var argv = [helperPath(), "status", "--tailnet-port", String(tailnetPort)]
     if (tailnetHost !== "") argv.push("--tailnet-host", tailnetHost)
-    statusProcess.command = argv
-    statusProcess.running = true
+    run(statusProcess, argv, "status")
   }
 
   function applyStatus(data) {
@@ -119,11 +128,11 @@ Item {
     pairPhase = ""
     pairQrPath = ""
     pairMessage = ""
-    pairProcess.command = [helperPath(), "pair", "--timeout", String(intSetting("pairTimeoutSec", 120, 30, 600))]
-    pairProcess.running = true
+    run(pairProcess, [helperPath(), "pair", "--timeout", String(intSetting("pairTimeoutSec", 120, 30, 600))], "pair")
   }
 
   function cancelPair() {
+    logLine("pair: cancelled")
     if (pairProcess.running) pairProcess.signal(15)
     pairing = false
     pairPhase = ""
@@ -132,7 +141,8 @@ Item {
 
   function handlePairEvent(line) {
     var ev = parseJson(line)
-    if (!ev || !ev.event) return
+    if (!ev || !ev.event) { logLine("pair: unparsed line " + line); return }
+    logLine("pair event: " + line)
     pairPhase = String(ev.event)
     if (ev.event === "qr") {
       pairQrPath = String(ev.qrPath || "")
@@ -156,7 +166,7 @@ Item {
   // ------------------------------------------------------------ connect
 
   function connectLan() {
-    runConnect([helperPath(), "connect", "--timeout", String(intSetting("lanTimeoutSec", 8, 2, 60))], "Looking for the phone on this network…")
+    runConnect([helperPath(), "connect", "--timeout", String(intSetting("lanTimeoutSec", 15, 2, 60))], "Looking for the phone on this network…")
   }
 
   function connectTailnet() {
@@ -168,13 +178,13 @@ Item {
     if (connectProcess.running) return
     lastError = ""
     actionStatus = status
-    connectProcess.command = argv
-    connectProcess.running = true
+    run(connectProcess, argv, "connect")
   }
 
   function handleConnectEvent(line) {
     var ev = parseJson(line)
-    if (!ev || !ev.event) return
+    if (!ev || !ev.event) { logLine("connect: unparsed line " + line); return }
+    logLine("connect event: " + line)
     if (ev.event === "connected") {
       actionStatus = "Connected to " + String(ev.serial || "")
       refresh()
@@ -197,14 +207,13 @@ Item {
     if (actionProcess.running) return
     lastError = ""
     actionProcess.doneStatus = doneStatus
-    actionProcess.command = argv
-    actionProcess.running = true
+    run(actionProcess, argv, "action")
   }
 
   // ------------------------------------------------------------- mirror
 
   function mirrorArgs() {
-    var mode = String(setting("mirrorMode", "Docked")).toLowerCase() === "window" ? "window" : "docked"
+    var mode = String(setting("mirrorMode", "Window")).toLowerCase() === "docked" ? "docked" : "window"
     var argv = [helperPath(), "mirror", "--mode", mode,
       "--align", String(setting("dockAlign", "Right")).toLowerCase(),
       "--width", String(intSetting("dockWidth", 420, 200, 1200)),
@@ -224,8 +233,7 @@ Item {
     if (mirrorProcess.running) return
     lastError = ""
     actionStatus = "Starting mirror…"
-    mirrorProcess.command = mirrorArgs()
-    mirrorProcess.running = true
+    run(mirrorProcess, mirrorArgs(), "mirror")
   }
 
   function stopMirror() {
@@ -259,6 +267,7 @@ Item {
     stderr: StdioCollector { id: statusStderr; waitForEnd: true }
     onExited: function(exitCode) {
       root.refreshing = false
+      if (exitCode !== 0) root.logLine("status exited " + exitCode + ": " + String(statusStderr.text || "").trim().slice(0, 300))
       var data = root.parseJson(String(statusStdout.text || ""))
       if (exitCode === 0 && data) root.applyStatus(data)
       else {
@@ -275,7 +284,9 @@ Item {
     running: false
     command: []
     stdout: SplitParser { onRead: function(line) { root.handlePairEvent(line) } }
+    stderr: SplitParser { onRead: function(line) { root.logLine("pair stderr: " + line) } }
     onExited: function(exitCode) {
+      root.logLine("pair exited " + exitCode)
       if (root.pairing) {
         root.pairing = false
         if (exitCode !== 0 && root.lastError === "") root.lastError = "Pairing helper exited with code " + exitCode
@@ -289,7 +300,9 @@ Item {
     running: false
     command: []
     stdout: SplitParser { onRead: function(line) { root.handleConnectEvent(line) } }
+    stderr: SplitParser { onRead: function(line) { root.logLine("connect stderr: " + line) } }
     onExited: function(exitCode) {
+      root.logLine("connect exited " + exitCode)
       if (exitCode !== 0 && root.lastError === "") root.lastError = "Connect failed"
       root.refresh()
     }
@@ -302,6 +315,7 @@ Item {
     command: []
     stdout: StdioCollector { id: actionStdout; waitForEnd: true }
     onExited: function(exitCode) {
+      root.logLine("action exited " + exitCode + ": " + String(actionStdout.text || "").trim().slice(0, 300))
       var data = root.parseJson(String(actionStdout.text || ""))
       if (exitCode === 0 && data && data.ok !== false) root.actionStatus = actionProcess.doneStatus
       else root.lastError = data && data.error ? String(data.error) : "Action failed"
@@ -314,7 +328,9 @@ Item {
     running: false
     command: []
     stdout: StdioCollector { id: mirrorStdout; waitForEnd: true }
+    stderr: StdioCollector { id: mirrorStderr; waitForEnd: true }
     onExited: function(exitCode) {
+      root.logLine("mirror exited " + exitCode + ": " + String(mirrorStdout.text || "").trim().slice(0, 300) + " " + String(mirrorStderr.text || "").trim().slice(0, 300))
       var data = root.parseJson(String(mirrorStdout.text || ""))
       if (exitCode === 0 && data && data.ok) root.actionStatus = data.mode === "docked" ? "Mirroring under the bar" : "Mirroring in its own window"
       else root.lastError = data && data.error ? String(data.error) : "Could not start scrcpy"

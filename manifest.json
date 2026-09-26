@@ -20,7 +20,7 @@
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 30,
-      "mirrorMode": "Docked",
+      "mirrorMode": "Window",
       "dockAlign": "Right",
       "dockWidth": 420,
       "maxSize": 1080,
@@ -33,12 +33,12 @@
       "tailnetHost": "",
       "tailnetPort": 5555,
       "autoMirror": true,
-      "lanTimeoutSec": 8,
+      "lanTimeoutSec": 15,
       "pairTimeoutSec": 120
     },
     "schema": [
       { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 5, "max": 600, "step": 5, "defaultValue": 30 },
-      { "key": "mirrorMode", "type": "enum", "label": "Mirror opens as", "options": ["Docked", "Window"], "defaultValue": "Docked", "description": "Docked parks a borderless, always-on-top mirror under the bar. Window opens a normal window you can tile or float." },
+      { "key": "mirrorMode", "type": "enum", "label": "Mirror opens as", "options": ["Window", "Docked"], "defaultValue": "Window", "description": "Window opens a normal window you can tile or float. Docked (experimental) parks a borderless, always-on-top mirror under the bar." },
       { "key": "dockAlign", "type": "enum", "label": "Docked position", "options": ["Right", "Center", "Left"], "defaultValue": "Right" },
       { "key": "dockWidth", "type": "integer", "label": "Docked width (px)", "min": 200, "max": 1200, "step": 20, "defaultValue": 420 },
       { "key": "maxSize", "type": "integer", "label": "Max video size (px, 0 = native)", "min": 0, "max": 2160, "step": 120, "defaultValue": 1080 },
@@ -51,7 +51,7 @@
       { "key": "tailnetHost", "type": "string", "label": "Tailnet host (MagicDNS name or 100.x IP)", "defaultValue": "", "description": "Used by Connect via tailnet. The phone must be in adb tcpip mode; use Enable tailnet mode once per phone reboot." },
       { "key": "tailnetPort", "type": "integer", "label": "Tailnet adb port", "min": 1024, "max": 65535, "step": 1, "defaultValue": 5555 },
       { "key": "autoMirror", "type": "boolean", "label": "Start mirroring right after connecting", "defaultValue": true },
-      { "key": "lanTimeoutSec", "type": "integer", "label": "LAN discovery timeout (seconds)", "min": 2, "max": 60, "step": 1, "defaultValue": 8 },
+      { "key": "lanTimeoutSec", "type": "integer", "label": "LAN discovery timeout (seconds)", "min": 2, "max": 60, "step": 1, "defaultValue": 15 },
       { "key": "pairTimeoutSec", "type": "integer", "label": "QR pairing timeout (seconds)", "min": 30, "max": 600, "step": 30, "defaultValue": 120 }
     ]
   }

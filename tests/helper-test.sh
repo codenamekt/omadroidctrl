@@ -103,6 +103,11 @@ assert_jq '.lan.connect | length == 1 and .[0].host == "192.168.1.20" and .[0].p
 assert_jq '.mirror.running == false' "$out" "status reports no mirror"
 assert_jq '.hostKey == false' "$out" "status reports no adb host key yet"
 assert_jq '.tailnet.host == "pixel" and .tailnet.port == 5555' "$out" "status echoes the tailnet target"
+[[ -f "$XDG_STATE_HOME/omadroidctrl/helper.log" ]] || fail "helper does not write its log file"
+grep -q "run: status --tailnet-host pixel" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record the command"
+grep -q "avahi _adb-tls-connect._tcp: 1 resolved" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record mDNS results"
+out=$("$HELPER" log 5)
+assert_jq '(.path | endswith("/omadroidctrl/helper.log")) and (.lines | length) <= 5 and (.lines | length) > 0' "$out" "log subcommand returns the tail as JSON"
 
 printf 'key' >"$ANDROID_USER_HOME/adbkey"
 out=$(ADB_DEVICES=two "$HELPER" status)
@@ -122,6 +127,7 @@ type=${@: -1}
 if [[ ${AVAHI_QUIET:-} == true ]]; then exit 0; fi
 if [[ $type == _adb-tls-pairing._tcp ]]; then
   name=$(cat "$XDG_STATE_HOME/pair-name" 2>/dev/null || true)
+  [[ -n ${AVAHI_PAIR_NAME:-} ]] && name=$AVAHI_PAIR_NAME
   count=$(grep -c "avahi-browse.*_adb-tls-pairing" "$STUB_LOG")
   if (( count >= 2 )) && [[ -n $name ]]; then
     printf '=;wlan0;IPv6;%s;_adb-tls-pairing._tcp;local;Pixel.local;fe80::1;37001;\n' "$name"
@@ -147,6 +153,11 @@ assert_jq '.[3].serial == "192.168.1.20:41123"' "$(jq -sc '.' <<<"$events")" "pa
 code=$(jq -r 'select(.event == "qr") | .code' <<<"$events")
 assert_logged "adb pair 192.168.1.20:37001 $code" "pair passes host, port and the pairing code to adb"
 assert_logged "adb connect 192.168.1.20:41123" "pair runs adb connect after pairing"
+grep -q "pair: using pairing service 192.168.1.20 37001 omadroidctrl-" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record the chosen pairing service"
+
+: >"$STUB_LOG"
+events=$(AVAHI_PAIR_NAME="Pixel pairing" "$HELPER" pair --timeout 10)
+assert_jq 'map(.event) == ["qr","pairing","paired","connected"]' "$(jq -sc '.' <<<"$events")" "a pairing service under a different name is still used"
 
 : >"$STUB_LOG"
 events=$(ADB_PAIR_FAIL=true "$HELPER" pair --timeout 10)

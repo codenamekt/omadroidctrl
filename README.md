@@ -89,7 +89,7 @@ Open them with the gear in the panel or `s`.
 
 | Setting | Default | What it does |
 |---|---|---|
-| Mirror opens as | Docked | Docked under the bar, or a normal window |
+| Mirror opens as | Window | A normal window, or docked under the bar (experimental) |
 | Docked position | Right | Right edge, centered, or left edge |
 | Docked width | 420 px | Height follows the phone's aspect ratio |
 | Max video size | 1080 | Longest side in pixels, 0 for native |
@@ -102,8 +102,30 @@ Open them with the gear in the panel or `s`.
 | Extra scrcpy arguments | | Anything scrcpy accepts, e.g. `--crop=1080:1920:0:0` |
 | Tailnet host / port | / 5555 | Target for Connect via tailnet |
 | Refresh interval | 30 s | Bar icon state polling while the panel is closed |
-| Wi-Fi discovery timeout | 8 s | How long Connect over Wi-Fi waits for mDNS |
+| Wi-Fi discovery timeout | 15 s | How long Connect over Wi-Fi waits for mDNS |
 | QR pairing timeout | 120 s | How long the QR code stays valid |
+
+## Troubleshooting
+
+Everything the plugin does is logged in two places:
+
+```bash
+tail -f ~/.local/state/omadroidctrl/helper.log        # every adb, avahi, scrcpy and hyprctl step
+journalctl --user -f | grep omadroidctrl              # what the panel asked for and got back
+omadroidctrl-helper log 60                            # last 60 helper lines as JSON
+```
+
+Common causes:
+
+- **Nothing happens after scanning.** Android only advertises wireless
+  debugging while the phone is awake and the feature is on. Keep the phone
+  unlocked on the Wireless debugging screen until the panel says connected.
+  The helper log shows every mDNS service it saw.
+- **"No phone found on Wi-Fi".** Same cause, or the network blocks mDNS
+  (guest and many corporate Wi-Fi networks do). Pairing and Wi-Fi connect need
+  multicast; use tailnet mode instead.
+- **Mirror starts then closes.** Read `~/.local/state/omadroidctrl/scrcpy.log`;
+  the helper copies its last lines into the panel error as well.
 
 ## Hyprland keybinds
 

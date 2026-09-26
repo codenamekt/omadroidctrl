@@ -37,6 +37,8 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  // Pairing keeps running while the panel is closed: the bar badge shows it,
+  // and the phone may take a while to be scanned.
   onOpenedChanged: {
     phone.panelOpen = opened
     if (opened) {
@@ -44,9 +46,6 @@ Panel {
       panelFlick.contentY = 0
       phone.refresh()
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-    } else if (phone.pairing) {
-      // Leave the QR up while the panel is closed only if pairing already got a scan.
-      if (phone.pairPhase === "qr") phone.cancelPair()
     }
   }
 
@@ -208,7 +207,7 @@ Panel {
           Text {
             width: parent.width
             visible: phone.lastError !== ""
-            text: phone.lastError
+            text: phone.lastError + "  (details: " + phone.logPath + ")"
             color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -293,7 +292,7 @@ Panel {
             Text {
               width: parent.width
               text: phone.pairPhase === "qr"
-                ? "On the phone: Settings → Developer options → Wireless debugging → Pair device with QR code. Both devices must be on the same Wi-Fi."
+                ? "On the phone: Settings → Developer options → Wireless debugging → Pair device with QR code. Both devices must be on the same Wi-Fi. You can close this panel; the code stays valid until it expires."
                 : phone.pairMessage
               color: root.foreground
               font.family: root.fontFamily
@@ -438,7 +437,7 @@ Panel {
             width: parent.width
             label: "Mirror opens as"
             options: root.mirrorModeOptions
-            value: String(phone.setting("mirrorMode", "Docked"))
+            value: String(phone.setting("mirrorMode", "Window"))
             foreground: root.foreground
             fontFamily: root.fontFamily
             onChanged: function(value) { root.persistSettings({ mirrorMode: value }) }
@@ -559,6 +558,16 @@ Panel {
             onModified: function(v) { root.persistSettings({ tailnetPort: v }) }
           }
 
+          PanelSectionHeader { width: parent.width; text: "Logs"; foreground: root.foreground; fontFamily: root.fontFamily }
+          Text {
+            width: parent.width
+            text: "Helper log: " + phone.logPath + "\nShell log: journalctl --user -f | grep omadroidctrl"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WrapAnywhere
+          }
+
           PanelSectionHeader { width: parent.width; text: "Timing"; foreground: root.foreground; fontFamily: root.fontFamily }
           NumberField {
             width: parent.width
@@ -572,7 +581,7 @@ Panel {
           NumberField {
             width: parent.width
             label: "Wi-Fi discovery timeout (s)"
-            value: phone.intSetting("lanTimeoutSec", 8, 2, 60)
+            value: phone.intSetting("lanTimeoutSec", 15, 2, 60)
             from: 2; to: 60; stepSize: 1
             foreground: root.foreground
             fontFamily: root.fontFamily

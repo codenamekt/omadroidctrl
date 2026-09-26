@@ -14,20 +14,32 @@
 #                               [--width PX] [--max-size N] [--bit-rate MBPS]
 #                               [--turn-screen-off] [--stay-awake] [--show-touches]
 #                               [--no-audio] [--extra "ARGS"] [--serial S]
-#   omadroidctrl-helper dock | undock | stop
+#   omadroidctrl-helper dock | undock | stop | log [N]
+#
+# Everything is logged to $XDG_STATE_HOME/omadroidctrl/helper.log.
 set -euo pipefail
 
 WINDOW_TITLE="omadroidctrl"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omadroidctrl"
 MIRROR_STATE="$STATE_DIR/mirror.json"
 PAIR_PNG="$STATE_DIR/pair.png"
+LOG_FILE="$STATE_DIR/helper.log"
 GAP=8
 
 mkdir -p "$STATE_DIR"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Append one timestamped line to the log; rotate once past 1 MB.
+log() {
+  if [[ -f $LOG_FILE ]] && (( $(stat -c %s "$LOG_FILE" 2>/dev/null || echo 0) > 1048576 )); then
+    mv -f "$LOG_FILE" "$LOG_FILE.1"
+  fi
+  printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$*" >>"$LOG_FILE"
+}
+
 json_error() {
+  log "error: $1"
   jq -cn --arg error "$1" '{ok:false,error:$error}'
   exit 1
 }
@@ -35,7 +47,10 @@ json_error() {
 event() {
   # event NAME [jq-args...]  -> one JSON line with "event": NAME
   local name=$1; shift
-  jq -cn --arg event "$name" "$@" '{event:$event} + $ARGS.named'
+  local line
+  line=$(jq -cn --arg event "$name" "$@" '{event:$event} + $ARGS.named')
+  log "event: $line"
+  printf '%s\n' "$line"
 }
 
 need() {
@@ -46,11 +61,14 @@ need() {
 
 # Print "host port name" for every IPv4 instance of an adb mDNS service type.
 browse() {
-  local type=$1
+  local type=$1 raw
   have avahi-browse || return 0
-  timeout 3 avahi-browse -rpt "$type" 2>/dev/null \
-    | awk -F';' '$1=="=" && $3=="IPv4" && $8 != "" && $9 != "" { print $8, $9, $4 }' \
-    | sort -u || true
+  raw=$(timeout 4 avahi-browse -rpt "$type" 2>/dev/null || true)
+  if [[ -n $raw ]]; then
+    log "avahi $type: $(grep -c '^=' <<<"$raw") resolved"
+    grep '^=' <<<"$raw" | cut -c1-200 | while IFS= read -r l; do log "  $l"; done
+  fi
+  awk -F';' '$1=="=" && $3=="IPv4" && $8 != "" && $9 != "" { print $8, $9, $4 }' <<<"$raw" | sort -u || true
 }
 
 browse_json() {
@@ -163,11 +181,17 @@ cmd_pair() {
   qrencode -s 8 -m 2 -t PNG -o "$PAIR_PNG" "WIFI:T:ADB;S:$name;P:$code;;"
   event qr --arg qrPath "$PAIR_PNG" --arg name "$name" --arg code "$code" --argjson timeout "$timeout_s"
 
-  local deadline=$(( $(date +%s) + timeout_s )) line host port
+  log "pair: waiting up to ${timeout_s}s for a pairing service (requested name $name)"
+  local deadline=$(( $(date +%s) + timeout_s )) found line host port
   while :; do
-    line=$(browse _adb-tls-pairing._tcp | awk -v n="$name" '$3 == n { print; exit }') || true
+    found=$(browse _adb-tls-pairing._tcp) || true
+    # Prefer the instance named after our QR; otherwise take any pairing
+    # service, since phones do not always honour the requested name.
+    line=$(awk -v n="$name" '$3 == n { print; exit }' <<<"$found")
+    [[ -n $line ]] || line=$(head -1 <<<"$found")
     if [[ -n $line ]]; then
       host=$(cut -d' ' -f1 <<<"$line"); port=$(cut -d' ' -f2 <<<"$line")
+      log "pair: using pairing service $line"
       break
     fi
     if (( $(date +%s) >= deadline )); then
@@ -179,35 +203,40 @@ cmd_pair() {
   done
   event pairing --arg host "$host" --argjson port "$port"
   local out
-  if ! out=$(adb pair "$host:$port" "$code" 2>&1); then
+  out=$(timeout 30 adb pair "$host:$port" "$code" 2>&1) && log "adb pair: $out" || {
+    log "adb pair failed: $out"
     rm -f "$PAIR_PNG"
-    event error --arg message "adb pair failed: $(tr '\n' ' ' <<<"$out")"
+    event error --arg message "adb pair failed: $(tr '\n' ' ' <<<"${out:-timed out}")"
     exit 0
-  fi
+  }
   rm -f "$PAIR_PNG"
   event paired --arg host "$host" --argjson port "$port"
-  connect_lan "$host" 20 || true
+  # The connect service can take a few seconds to show up after pairing.
+  connect_lan "$host" 30 || true
 }
 
 # ------------------------------------------------------------------- connect
 
 # Discover _adb-tls-connect on the LAN (optionally only for HOST) and connect.
 connect_lan() {
-  local want_host=${1:-} timeout_s=${2:-8}
+  local want_host=${1:-} timeout_s=${2:-15}
   local deadline=$(( $(date +%s) + timeout_s )) line host port out
+  log "connect: waiting up to ${timeout_s}s for a connect service${want_host:+ from $want_host}"
   while :; do
-    line=$(browse _adb-tls-connect._tcp | awk -v h="$want_host" 'h == "" || $1 == h { print; exit }') || true
+    line=$(awk -v h="$want_host" 'h == "" || $1 == h { print; exit }' <<<"$(browse _adb-tls-connect._tcp)")
     if [[ -n $line ]]; then
       host=$(cut -d' ' -f1 <<<"$line"); port=$(cut -d' ' -f2 <<<"$line")
-      if out=$(adb connect "$host:$port" 2>&1) && grep -qi "connected" <<<"$out" && ! grep -qi "failed\|cannot" <<<"$out"; then
+      out=$(timeout 20 adb connect "$host:$port" 2>&1) || true
+      log "adb connect $host:$port: $out"
+      if grep -qi "connected" <<<"$out" && ! grep -qi "failed\|cannot\|unable" <<<"$out"; then
         event connected --arg serial "$host:$port" --arg message "$(tr '\n' ' ' <<<"$out")"
         return 0
       fi
-      event error --arg message "adb connect $host:$port: $(tr '\n' ' ' <<<"$out")"
+      event error --arg message "adb connect $host:$port: $(tr '\n' ' ' <<<"${out:-timed out}")"
       return 1
     fi
     if (( $(date +%s) >= deadline )); then
-      event timeout --arg message "No phone advertising wireless debugging on this network"
+      event timeout --arg message "No phone advertising wireless debugging on this network. Unlock the phone and open Developer options → Wireless debugging."
       return 1
     fi
     sleep 1
@@ -215,7 +244,7 @@ connect_lan() {
 }
 
 cmd_connect() {
-  local target="" timeout_s=8
+  local target="" timeout_s=15
   while [[ $# -gt 0 ]]; do
     case $1 in
       --target) target=$2; shift 2 ;;
@@ -227,7 +256,9 @@ cmd_connect() {
   if [[ -n $target ]]; then
     [[ $target == *:* ]] || target="$target:5555"
     local out
-    if out=$(timeout 15 adb connect "$target" 2>&1) && grep -qi "connected" <<<"$out" && ! grep -qi "failed\|cannot\|unable" <<<"$out"; then
+    out=$(timeout 15 adb connect "$target" 2>&1) || true
+    log "adb connect $target: $out"
+    if grep -qi "connected" <<<"$out" && ! grep -qi "failed\|cannot\|unable" <<<"$out"; then
       event connected --arg serial "$target" --arg message "$(tr '\n' ' ' <<<"$out")"
     else
       event error --arg message "adb connect $target: $(tr '\n' ' ' <<<"${out:-timed out}")"
@@ -273,6 +304,7 @@ focused_monitor() {
 # Float, pin and park the mirror window under the bar.
 apply_dock() {
   local address=$1 align=$2 width=$3
+  log "dock: window $address align=$align width=$width"
   local mx my mw mh top scale
   read -r mx my mw mh top scale < <(focused_monitor)
   # hyprctl geometry is in physical pixels; window sizes below are logical.
@@ -291,6 +323,7 @@ apply_dock() {
     *) x=$(( mx + lw - width - GAP )) ;;
   esac
   local y=$(( my + top + GAP ))
+  log "dock: geometry x=$x y=$y w=$width h=$h (monitor ${mw}x${mh}@${scale}, reserved top $top)"
   hyprctl --batch "dispatch setfloating address:$address; dispatch pin address:$address" >/dev/null 2>&1 || true
   if (( h > 0 )); then
     hyprctl dispatch resizewindowpixel exact "$width" "$h",address:"$address" >/dev/null 2>&1 || true
@@ -350,6 +383,7 @@ cmd_mirror() {
     argv+=("${extra_args[@]}")
   fi
 
+  log "mirror: ${argv[*]}"
   setsid "${argv[@]}" >"$STATE_DIR/scrcpy.log" 2>&1 < /dev/null &
   local pid=$!
   jq -cn --argjson pid "$pid" --arg mode "$mode" --arg align "$align" --argjson width "$width" --arg serial "$serial" \
@@ -362,8 +396,10 @@ cmd_mirror() {
   sleep 0.5
   if ! kill -0 "$pid" 2>/dev/null; then
     rm -f "$MIRROR_STATE"
+    log "scrcpy exited early; log follows"; tail -n 20 "$STATE_DIR/scrcpy.log" 2>/dev/null | while IFS= read -r l; do log "  scrcpy: $l"; done
     json_error "scrcpy exited: $(tail -n 3 "$STATE_DIR/scrcpy.log" 2>/dev/null | tr '\n' ' ')"
   fi
+  log "mirror: scrcpy pid $pid running ($mode)"
   jq -cn --argjson pid "$pid" --arg mode "$mode" --arg serial "$serial" '{ok:true,pid:$pid,mode:$mode,serial:$serial}'
 }
 
@@ -396,10 +432,17 @@ cmd_undock() {
   jq -cn '{ok:true,mode:"window"}'
 }
 
+cmd_log() {
+  local n=${1:-40}
+  jq -cn --arg path "$LOG_FILE" --arg scrcpy "$STATE_DIR/scrcpy.log" \
+    --argjson lines "$( { tail -n "$n" "$LOG_FILE" 2>/dev/null || true; } | jq -Rs 'split("\n") | map(select(. != ""))')" \
+    '{path:$path,scrcpyLog:$scrcpy,lines:$lines}'
+}
+
 cmd_stop() {
   need jq
   local pid
-  if pid=$(mirror_pid); then kill "$pid" 2>/dev/null || true; fi
+  if pid=$(mirror_pid); then log "stop: killing scrcpy pid $pid"; kill "$pid" 2>/dev/null || true; fi
   pkill -f "scrcpy.*--window-title=$WINDOW_TITLE" 2>/dev/null || true
   rm -f "$MIRROR_STATE"
   jq -cn '{ok:true}'
@@ -410,7 +453,9 @@ cmd_stop() {
 cmd=${1:-}
 [[ -n $cmd ]] || { sed -n 2,20p "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 shift
+[[ $cmd == log ]] || log "run: $cmd $*"
 case $cmd in
+  log) cmd_log "$@" ;;
   status) cmd_status "$@" ;;
   pair) cmd_pair "$@" ;;
   connect) cmd_connect "$@" ;;
