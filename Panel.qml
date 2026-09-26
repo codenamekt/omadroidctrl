@@ -7,7 +7,7 @@ import qs.Commons
 import qs.Ui
 
 // omadroidctrl: a phone in the bar. Click for the panel, middle-click to start
-// or stop the mirror, right-click to dock it under the bar or pop it out.
+// or stop the mirror, right-click for settings.
 Panel {
   id: root
   moduleName: "codenamekt.omadroidctrl"
@@ -23,16 +23,6 @@ Panel {
   readonly property color barIconColor: phone.connected || phone.mirroring ? barForeground : Qt.darker(barForeground, 1.55)
   readonly property bool showBadge: phone.mirroring || phone.pairing
   readonly property string phoneGlyph: "󰄜"
-
-  readonly property var mirrorModeOptions: [
-    { value: "Docked", label: "Docked under the bar" },
-    { value: "Window", label: "Own window" }
-  ]
-  readonly property var dockAlignOptions: [
-    { value: "Right", label: "Right edge" },
-    { value: "Center", label: "Centered" },
-    { value: "Left", label: "Left edge" }
-  ]
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -80,7 +70,6 @@ Panel {
     function mirror(): string { phone.startMirror(); return "ok" }
     function stop(): string { phone.stopMirror(); return "ok" }
     function toggleMirror(): string { phone.toggleMirror(); return "ok" }
-    function toggleWindow(): string { phone.toggleDock(); return "ok" }
     function pair(): string { root.open(); phone.pair(); return "ok" }
     function connect(): string { phone.connectLan(); return "ok" }
     function connectTailnet(): string { phone.connectTailnet(); return "ok" }
@@ -119,7 +108,7 @@ Panel {
     }
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) phone.toggleMirror()
-      else if (buttonCode === Qt.RightButton) phone.toggleDock()
+      else if (buttonCode === Qt.RightButton) { root.open(); root.showSettings(true) }
       else root.toggle()
     }
   }
@@ -150,7 +139,6 @@ Panel {
         if (root.settingsOpen) return
         var k = String(t).toLowerCase()
         if (k === "m") phone.toggleMirror()
-        else if (k === "w") phone.toggleDock()
         else if (k === "p") { if (phone.pairing) phone.cancelPair(); else phone.pair() }
         else if (k === "c") phone.connectLan()
         else if (k === "t") phone.connectTailnet()
@@ -214,33 +202,18 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // ----------------------------------------------- primary actions
-          Row {
+          // ------------------------------------------------ primary action
+          Button {
             width: parent.width
-            spacing: Style.space(8)
             visible: phone.ready && !phone.pairing
-
-            Button {
-              width: (parent.width - Style.space(8)) / 2
-              text: phone.mirroring ? "Stop mirror" : "Mirror"
-              iconText: phone.mirroring ? "󰄛" : "󰐊"
-              tooltipText: (phone.mirroring ? "Stop scrcpy" : "Start scrcpy") + "  m"
-              enabled: phone.mirroring || phone.connected
-              selected: phone.mirroring
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: phone.toggleMirror()
-            }
-            Button {
-              width: (parent.width - Style.space(8)) / 2
-              text: phone.docked ? "Pop out" : "Dock"
-              iconText: phone.docked ? "󰖯" : "󰁍"
-              tooltipText: (phone.docked ? "Move the mirror into its own window" : "Park the mirror under the bar") + "  w"
-              enabled: phone.mirroring
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: phone.toggleDock()
-            }
+            text: phone.mirroring ? "Stop mirror" : "Mirror in a window"
+            iconText: phone.mirroring ? "󰄛" : "󰐊"
+            tooltipText: (phone.mirroring ? "Stop scrcpy" : "Start scrcpy in its own window") + "  m"
+            enabled: phone.mirroring || phone.connected
+            selected: phone.mirroring
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: phone.toggleMirror()
           }
 
           // ------------------------------------------------- missing deps
@@ -398,7 +371,7 @@ Panel {
 
           Text {
             width: parent.width
-            text: "m mirror · w dock/pop out · p pair · c Wi-Fi · t tailnet · d disconnect · s settings"
+            text: "m mirror · p pair · c Wi-Fi · t tailnet · d disconnect · s settings"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -433,33 +406,6 @@ Panel {
           }
 
           PanelSectionHeader { width: parent.width; text: "Mirror"; foreground: root.foreground; fontFamily: root.fontFamily }
-          Dropdown {
-            width: parent.width
-            label: "Mirror opens as"
-            options: root.mirrorModeOptions
-            value: String(phone.setting("mirrorMode", "Window"))
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            onChanged: function(value) { root.persistSettings({ mirrorMode: value }) }
-          }
-          Dropdown {
-            width: parent.width
-            label: "Docked position"
-            options: root.dockAlignOptions
-            value: String(phone.setting("dockAlign", "Right"))
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            onChanged: function(value) { root.persistSettings({ dockAlign: value }) }
-          }
-          NumberField {
-            width: parent.width
-            label: "Docked width (px)"
-            value: phone.intSetting("dockWidth", 420, 200, 1200)
-            from: 200; to: 1200; stepSize: 20
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            onModified: function(v) { root.persistSettings({ dockWidth: v }) }
-          }
           NumberField {
             width: parent.width
             label: "Max video size (px, 0 = native)"

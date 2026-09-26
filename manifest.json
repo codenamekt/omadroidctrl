@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "Toby Stevenson",
   "license": "MIT",
-  "description": "Pair your Android phone with a QR code and mirror it under the bar or in its own window, over Wi-Fi or your tailnet.",
+  "description": "Pair your Android phone with a QR code and mirror it with scrcpy, over Wi-Fi or your tailnet, from the bar.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
@@ -13,16 +13,13 @@
   },
   "barWidget": {
     "displayName": "omadroidctrl",
-    "description": "Android phone control: QR pairing, wireless adb connect, scrcpy mirroring docked under the bar or popped out into its own window.",
+    "description": "Android phone control: QR pairing, wireless adb connect over Wi-Fi or a tailnet, and one-click scrcpy mirroring.",
     "category": "Development",
     "aliases": ["android", "phone", "scrcpy", "adb", "mirror"],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 30,
-      "mirrorMode": "Window",
-      "dockAlign": "Right",
-      "dockWidth": 420,
       "maxSize": 1080,
       "bitRateMbps": 8,
       "turnScreenOff": false,
@@ -38,9 +35,6 @@
     },
     "schema": [
       { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 5, "max": 600, "step": 5, "defaultValue": 30 },
-      { "key": "mirrorMode", "type": "enum", "label": "Mirror opens as", "options": ["Window", "Docked"], "defaultValue": "Window", "description": "Window opens a normal window you can tile or float. Docked (experimental) parks a borderless, always-on-top mirror under the bar." },
-      { "key": "dockAlign", "type": "enum", "label": "Docked position", "options": ["Right", "Center", "Left"], "defaultValue": "Right" },
-      { "key": "dockWidth", "type": "integer", "label": "Docked width (px)", "min": 200, "max": 1200, "step": 20, "defaultValue": 420 },
       { "key": "maxSize", "type": "integer", "label": "Max video size (px, 0 = native)", "min": 0, "max": 2160, "step": 120, "defaultValue": 1080 },
       { "key": "bitRateMbps", "type": "integer", "label": "Video bit rate (Mbps, 0 = scrcpy default)", "min": 0, "max": 40, "step": 1, "defaultValue": 8 },
       { "key": "turnScreenOff", "type": "boolean", "label": "Turn the phone screen off while mirroring", "defaultValue": false },

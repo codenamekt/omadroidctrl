@@ -8,7 +8,7 @@ contains() { grep -qF -- "$2" "$ROOT/$1" || fail "$1: $3"; }
 contains Panel.qml 'moduleName: "codenamekt.omadroidctrl"' "panel module name must match the manifest id"
 contains Panel.qml 'ipcTarget: "codenamekt.omadroidctrl"' "ipc target must match the manifest id"
 contains Panel.qml 'manageIpc: false' "panel must own its IpcHandler to expose mirror/pair/connect"
-for fn in 'function mirror()' 'function stop()' 'function toggleMirror()' 'function toggleWindow()' 'function pair()' 'function connect()' 'function disconnect()' 'function status()'; do
+for fn in 'function mirror()' 'function stop()' 'function toggleMirror()' 'function pair()' 'function connect()' 'function disconnect()' 'function status()'; do
   contains Panel.qml "$fn" "IPC handler is missing $fn"
 done
 contains Panel.qml 'BarIconButton {' "bar icon must use the shared BarIconButton"
@@ -18,11 +18,12 @@ contains Panel.qml 'bar.foreground' "colors must come from the bar theme, not ha
 contains Panel.qml 'source: phone.pairQrPath !== "" ? "file://" + phone.pairQrPath : ""' "QR image must render the helper's PNG"
 contains Panel.qml 'onEditingFinished: root.persistSettings({ tailnetHost: text.trim() })' "tailnet host must persist through updateEntryInline"
 contains Panel.qml 'if (buttonCode === Qt.MiddleButton) phone.toggleMirror()' "middle click must toggle the mirror"
-contains Panel.qml 'else if (buttonCode === Qt.RightButton) phone.toggleDock()' "right click must dock or pop out"
+contains Panel.qml 'else if (buttonCode === Qt.RightButton) { root.open(); root.showSettings(true) }' "right click must open settings"
+! grep -q "toggleDock\|docked" "$ROOT/Panel.qml" "$ROOT/Service.qml" || fail "docking must stay out of the v1 UI"
 ! grep -qE '"#[0-9a-fA-F]{6}"' "$ROOT/Panel.qml" || fail "Panel.qml hard-codes a color"
 
 contains Service.qml 'Qt.resolvedUrl("omadroidctrl-helper")' "service must resolve the bundled helper"
-for sub in '"status"' '"pair"' '"connect"' '"disconnect"' '"tcpip"' '"mirror"' '"stop"' '"dock"' '"undock"'; do
+for sub in '"status"' '"pair"' '"connect"' '"disconnect"' '"tcpip"' '"mirror"' '"stop"'; do
   contains Service.qml "$sub" "service never calls helper subcommand $sub"
 done
 contains Service.qml 'stdout: SplitParser { onRead: function(line) { root.handlePairEvent(line) } }' "pair events must stream line by line"

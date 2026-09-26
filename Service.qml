@@ -37,8 +37,6 @@ Item {
 
   readonly property bool connected: active !== null && active !== undefined
   readonly property bool mirroring: mirror && mirror.running === true
-  readonly property string mirrorMode: mirroring && mirror.mode ? String(mirror.mode) : ""
-  readonly property bool docked: mirrorMode === "docked"
   readonly property bool lanAvailable: Array.isArray(lanConnect) && lanConnect.length > 0
   readonly property string tailnetHost: String(setting("tailnetHost", "")).trim()
   readonly property int tailnetPort: intSetting("tailnetPort", 5555, 1024, 65535)
@@ -59,7 +57,7 @@ Item {
       if (pairPhase === "paired") return "Paired, connecting…"
       return "Pairing…"
     }
-    if (mirroring) return docked ? "Mirroring · docked" : "Mirroring · window"
+    if (mirroring) return "Mirroring"
     if (connected) return "Connected · " + String(active.serial || "")
     if (lanAvailable) return "Phone found on Wi-Fi"
     if (!hostKey) return "Not paired yet"
@@ -213,10 +211,7 @@ Item {
   // ------------------------------------------------------------- mirror
 
   function mirrorArgs() {
-    var mode = String(setting("mirrorMode", "Window")).toLowerCase() === "docked" ? "docked" : "window"
-    var argv = [helperPath(), "mirror", "--mode", mode,
-      "--align", String(setting("dockAlign", "Right")).toLowerCase(),
-      "--width", String(intSetting("dockWidth", 420, 200, 1200)),
+    var argv = [helperPath(), "mirror", "--mode", "window",
       "--max-size", String(intSetting("maxSize", 1080, 0, 2160)),
       "--bit-rate", String(intSetting("bitRateMbps", 8, 0, 40))]
     if (boolSetting("turnScreenOff", false)) argv.push("--turn-screen-off")
@@ -244,28 +239,6 @@ Item {
 
   function toggleMirror() {
     if (mirroring) stopMirror(); else startMirror()
-  }
-
-  function dock() {
-    runAction([helperPath(), "dock", "--align", String(setting("dockAlign", "Right")).toLowerCase(), "--width", String(intSetting("dockWidth", 420, 200, 1200))], "Docked under the bar")
-  }
-
-  function undock() {
-    runAction([helperPath(), "undock"], "Popped out into its own window")
-  }
-
-  function toggleDock() {
-    if (!mirroring) {
-      // Nothing to move yet: start the mirror straight into docked mode.
-      if (mirrorProcess.running || !connected) return
-      lastError = ""
-      actionStatus = "Starting docked mirror…"
-      var argv = mirrorArgs()
-      argv[argv.indexOf("--mode") + 1] = "docked"
-      run(mirrorProcess, argv, "mirror")
-      return
-    }
-    if (docked) undock(); else dock()
   }
 
   // ---------------------------------------------------------- processes
@@ -343,7 +316,7 @@ Item {
     onExited: function(exitCode) {
       root.logLine("mirror exited " + exitCode + ": " + String(mirrorStdout.text || "").trim().slice(0, 300) + " " + String(mirrorStderr.text || "").trim().slice(0, 300))
       var data = root.parseJson(String(mirrorStdout.text || ""))
-      if (exitCode === 0 && data && data.ok) root.actionStatus = data.mode === "docked" ? "Mirroring under the bar" : "Mirroring in its own window"
+      if (exitCode === 0 && data && data.ok) root.actionStatus = "Mirroring in its own window"
       else root.lastError = data && data.error ? String(data.error) : "Could not start scrcpy"
       root.refresh()
     }
