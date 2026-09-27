@@ -49,6 +49,19 @@ in a floating terminal.
 The widget appears at the right of the bar. Move it with
 `omarchy bar move codenamekt.omadroidctrl --section center`.
 
+## Uninstall
+
+```bash
+omarchy plugin remove codenamekt.omadroidctrl   # disables it and deletes the clone
+rm -rf ~/.local/state/omadroidctrl              # helper log, pairing QR, mirror state
+```
+
+Also remove any [Hyprland keybinds](#hyprland-keybinds) you added. To revoke
+this computer on the phone, use **Wireless debugging → Paired devices → Forget**.
+`~/.android/adbkey` is shared with plain `adb`, so leave it unless you want to
+unpair every device. The packages can go too if nothing else needs them:
+`omarchy pkg drop android-tools scrcpy qrencode`.
+
 ## First pairing
 
 1. On the phone, turn on **Developer options → Wireless debugging** and join
