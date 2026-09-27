@@ -111,14 +111,21 @@ out=$("$HELPER" status --tailnet-host pixel --tailnet-port 5555)
 assert_jq '.schemaVersion == 1 and .deps.adb and .deps.scrcpy and .deps.avahi and .deps.qrencode and .deps.hyprctl' "$out" "status reports every dependency"
 assert_jq '.devices | length == 1 and .[0].serial == "192.168.1.20:41123" and .[0].model == "Pixel 9 Pro" and .[0].wireless == true' "$out" "status parses adb devices -l"
 assert_jq '.active.serial == "192.168.1.20:41123"' "$out" "status picks the ready wireless device as active"
-assert_jq '.lan.connect | length == 1 and .[0].host == "192.168.1.20" and .[0].port == 41123' "$out" "status lists LAN connect services"
+assert_jq '.lan.connect | length == 0' "$out" "browse skips mDNS when the avahi daemon is not running"
 assert_jq '.mirror.running == false' "$out" "status reports no mirror"
 assert_jq '.hostKey == false' "$out" "status reports no adb host key yet"
 assert_jq '.tailnet.host == "pixel" and .tailnet.port == 5555' "$out" "status echoes the tailnet target"
 assert_jq '.missing == [] and .deps.avahiDaemon == false' "$out" "status reports missing packages and the avahi daemon"
 [[ -f "$XDG_STATE_HOME/omadroidctrl/helper.log" ]] || fail "helper does not write its log file"
 grep -q "run: status --tailnet-host pixel" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record the command"
-grep -q "avahi _adb-tls-connect._tcp: 1 resolved" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record mDNS results"
+grep -q 'avahi _adb-tls-connect._tcp:' "$XDG_STATE_HOME/omadroidctrl/helper.log" && \
+  fail "browse must not query mDNS when the avahi daemon is stopped"
+
+# When the avahi daemon is running, browse() actually queries mDNS and returns
+# the `_adb-tls-connect._tcp` records the stub advertises.
+out=$(AVAHI_DAEMON=active "$HELPER" status)
+assert_jq '.lan.connect | length == 1 and .[0].host == "192.168.1.20" and .[0].port == 41123' "$out" "status lists LAN connect services when avahi-daemon is running"
+grep -q "avahi _adb-tls-connect._tcp: 1 resolved" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record mDNS results when daemon is running"
 out=$("$HELPER" log 5)
 assert_jq '(.path | endswith("/omadroidctrl/helper.log")) and (.lines | length) <= 5 and (.lines | length) > 0' "$out" "log subcommand returns the tail as JSON"
 
@@ -151,7 +158,7 @@ elif [[ $type == _adb-tls-connect._tcp ]]; then
 fi
 exit 0
 STUB
-quiet=$(AVAHI_QUIET=true "$HELPER" pair --timeout 2)
+quiet=$(AVAHI_DAEMON=active AVAHI_QUIET=true "$HELPER" pair --timeout 2)
 first=$(head -1 <<<"$quiet")
 assert_jq '.event == "qr" and (.qrPath | endswith("/omadroidctrl/pair.png")) and (.name | startswith("omadroidctrl-")) and (.code | test("^[0-9]{6}$")) and .timeout == 2' "$first" "pair emits a qr event with path, name and six-digit code"
 assert_logged "qrencode -s 8 -m 2 -t PNG -o" "pair renders the QR with qrencode"
@@ -159,7 +166,7 @@ assert_jq '.event == "timeout"' "$(tail -1 <<<"$quiet")" "pair times out when no
 [[ ! -f "$XDG_STATE_HOME/omadroidctrl/pair.png" ]] || fail "pair timeout should remove the QR image"
 
 : >"$STUB_LOG"
-events=$("$HELPER" pair --timeout 10)
+events=$(AVAHI_DAEMON=active "$HELPER" pair --timeout 10)
 assert_jq 'map(.event) == ["qr","pairing","paired","connected"]' "$(jq -sc '.' <<<"$events")" "pair streams qr, pairing, paired, connected"
 assert_jq '.[1].host == "192.168.1.20" and .[1].port == 37001' "$(jq -sc '.' <<<"$events")" "pair uses the IPv4 pairing service, not the IPv6 one"
 assert_jq '.[3].serial == "192.168.1.20:41123"' "$(jq -sc '.' <<<"$events")" "pair connects to the phone's connect service afterwards"
@@ -169,20 +176,20 @@ assert_logged "adb connect 192.168.1.20:41123" "pair runs adb connect after pair
 grep -q "pair: using pairing service 192.168.1.20 37001 omadroidctrl-" "$XDG_STATE_HOME/omadroidctrl/helper.log" || fail "helper log does not record the chosen pairing service"
 
 : >"$STUB_LOG"
-events=$(AVAHI_PAIR_NAME="Pixel pairing" "$HELPER" pair --timeout 10)
+events=$(AVAHI_DAEMON=active AVAHI_PAIR_NAME="Pixel pairing" "$HELPER" pair --timeout 10)
 assert_jq 'map(.event) == ["qr","pairing","paired","connected"]' "$(jq -sc '.' <<<"$events")" "a pairing service under a different name is still used"
 
 : >"$STUB_LOG"
-events=$(ADB_PAIR_FAIL=true "$HELPER" pair --timeout 10)
+events=$(AVAHI_DAEMON=active ADB_PAIR_FAIL=true "$HELPER" pair --timeout 10)
 assert_jq 'map(.event) == ["qr","pairing","error"] and (.[2].message | test("adb pair failed"))' "$(jq -sc '.' <<<"$events")" "a rejected pairing code reports an error event"
 assert_not_logged "adb connect" "a failed pairing must not attempt adb connect"
 
 # ---------------------------------------------------------------- connect
 
 : >"$STUB_LOG"
-out=$("$HELPER" connect --timeout 5)
+out=$(AVAHI_DAEMON=active "$HELPER" connect --timeout 5)
 assert_jq '.event == "connected" and .serial == "192.168.1.20:41123"' "$out" "connect discovers the LAN service and connects"
-out=$(AVAHI_NO_CONNECT=true "$HELPER" connect --timeout 2)
+out=$(AVAHI_DAEMON=active AVAHI_NO_CONNECT=true "$HELPER" connect --timeout 2)
 assert_jq '.event == "timeout"' "$out" "connect times out without a LAN service"
 : >"$STUB_LOG"
 out=$("$HELPER" connect --target pixel)
@@ -266,12 +273,38 @@ assert_jq '.ok == false and (.error | test("not installed"))' "$out" "pair fails
 
 # ---------------------------------------------------------------- install
 
+# Install never touches systemd — it only installs missing packages. A user
+# who wants LAN discovery runs `omadroidctrl-helper enable-avahi` themselves
+# (or clicks the "Open terminal to enable avahi-daemon" button in the panel).
+
 out=$(AVAHI_DAEMON=active "$HELPER" install)
 assert_jq '.ok and .launched == false' "$out" "install does nothing when everything is set up"
 
-out=$("$HELPER" install)
-assert_jq '.ok and .launched and .steps == ["sudo systemctl enable --now avahi-daemon.service"]' "$out" "install enables a stopped avahi-daemon"
+# install never adds `sudo systemctl enable --now avahi-daemon.service` to its
+# steps array, regardless of daemon state. The plugin stays opt-in about
+# avahi-daemon. We check both possible daemon states to be thorough.
+for state in active inactive; do
+  out=$(AVAHI_DAEMON=$state "$HELPER" install)
+  assert_jq "(.steps // []) | index(\"sudo systemctl enable --now avahi-daemon.service\") | not" \
+    "$out" "install (avahi-daemon $state) never enables avahi-daemon"
+done
+
+# enable-avahi is the user-facing opt-in: it opens a floating terminal pre-filled
+# with `sudo systemctl enable --now avahi-daemon` so the user runs it themselves.
+: >"$STUB_LOG"
+out=$("$HELPER" enable-avahi)
+assert_jq '.ok and .launched' "$out" "enable-avahi opens a floating terminal"
 for _ in $(seq 20); do grep -q '^launch ' "$STUB_LOG" && break; sleep 0.1; done
-assert_logged "launch sudo systemctl enable --now avahi-daemon.service" "install runs its steps in a floating terminal"
+assert_logged "launch sudo systemctl enable --now avahi-daemon" \
+  "enable-avahi opens a terminal pre-filled with the systemd command"
+
+# enable-avahi is the user-facing opt-in: it opens a floating terminal pre-filled
+# with `sudo systemctl enable --now avahi-daemon` so the user runs it themselves.
+: >"$STUB_LOG"
+out=$("$HELPER" enable-avahi)
+assert_jq '.ok and .launched' "$out" "enable-avahi opens a floating terminal"
+for _ in $(seq 20); do grep -q '^launch ' "$STUB_LOG" && break; sleep 0.1; done
+assert_logged "launch sudo systemctl enable --now avahi-daemon" \
+  "enable-avahi opens a terminal pre-filled with the systemd command"
 
 echo "helper tests passed"

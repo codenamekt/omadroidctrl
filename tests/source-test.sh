@@ -30,7 +30,7 @@ contains Service.qml 'stdout: SplitParser { onRead: function(line) { root.handle
 contains Service.qml 'if (boolSetting("autoMirror", true)) startMirror()' "connect must honour the autoMirror setting"
 contains Service.qml 'pairProcess.signal(15)' "cancelling a pair must stop the helper"
 contains Service.qml '"install"' "service never calls helper subcommand \"install\""
-contains Panel.qml 'onClicked: phone.installDeps()' "setup section must offer to install what is missing"
+contains Panel.qml 'phone.missing.length > 0 ? phone.installDeps() : phone.enableAvahi()' "setup section must offer to install missing packages, or open a terminal to enable avahi-daemon"
 
 # Every setting the manifest declares is read by the service or panel.
 for key in $(jq -r '.barWidget.schema[].key' "$ROOT/manifest.json"); do

@@ -38,16 +38,38 @@ Direct link: [docs/screenshots/teaser/omadroidctrl_teaser_1080p.mp4](docs/screen
 ## Install
 
 ```bash
-omarchy pkg add android-tools scrcpy avahi qrencode jq   # adb, scrcpy, mDNS, QR, JSON
+omarchy pkg add android-tools scrcpy avahi qrencode jq   # adb, scrcpy, mDNS browser, QR, JSON
 omarchy plugin add https://github.com/codenamekt/omadroidctrl --enable
 ```
 
 Skipped the first line? The panel's **Setup** section lists what is missing and
-**Install missing packages** runs `omarchy pkg add` (and enables `avahi-daemon`)
-in a floating terminal.
+**Install missing packages** runs `omarchy pkg add` in a floating terminal.
 
 The widget appears at the right of the bar. Move it with
 `omarchy bar move io.github.codenamekt.omadroidctrl --section center`.
+
+### Optional: enable avahi-daemon
+
+The plugin ships without enabling any systemd service. The `avahi` package is
+installed by the command above (so `avahi-browse` is on `$PATH`), but the
+`avahi-daemon` is left stopped. This keeps the marketplace security baseline
+clean — the plugin never flips on a network-listening daemon for you — and it
+keeps you in control of what's listening on your LAN.
+
+If you want LAN auto-discovery (the **Connect over Wi-Fi** button), enable the
+daemon yourself:
+
+```bash
+sudo systemctl enable --now avahi-daemon
+```
+
+You can do that ahead of time, or click the **Setup → Open terminal to enable
+avahi-daemon** button in the panel when you want to enable LAN discovery.
+Uninstalling the plugin leaves avahi-daemon running — drop it separately with
+`sudo systemctl disable --now avahi-daemon` if you want to revert.
+
+LAN discovery over mDNS never crosses a tailnet, so the tailnet flow (below)
+works whether or not avahi is running.
 
 ## Uninstall
 
@@ -185,7 +207,11 @@ omarchy-shell io.github.codenamekt.omadroidctrl toggle         # the panel
 
 - Omarchy Quattro with shell plugins
 - Android 11 or newer (wireless debugging)
-- `android-tools`, `scrcpy`, `avahi`, `qrencode`, `jq`
+- `android-tools`, `scrcpy`, `avahi`, `qrencode`, `jq` (all listed in the
+  install command above)
+- `avahi-daemon` enabled *only* if you want LAN auto-discovery (see above).
+  Without it, you can still pair, mirror, and use the tailnet flow — just
+  supply the host:port or scan the QR code from the phone.
 
 ## Tests
 

@@ -67,7 +67,9 @@ missing_packages() {
   done
 }
 
-avahi_daemon_active() { systemctl is-active --quiet avahi-daemon.service 2>/dev/null; }
+# Read-only check — used by status reporting only. The plugin never enables
+# avahi-daemon itself; the user opts in if they want LAN discovery over mDNS.
+avahi_daemon_running() { systemctl is-active --quiet avahi-daemon.service 2>/dev/null; }
 
 # Built by hand: this must work before jq is installed.
 json_strings() {
@@ -82,6 +84,10 @@ json_strings() {
 browse() {
   local type=$1 raw
   have avahi-browse || return 0
+  # Fast path: if the daemon isn't running, skip the network roundtrip and
+  # let the caller fall through to `adb mdns` / manual entry. This avoids
+  # the 4-second `timeout` on every connect attempt.
+  if ! avahi_daemon_running; then return 0; fi
   raw=$(timeout 4 avahi-browse -rpt "$type" 2>/dev/null || true)
   if [[ -n $raw ]]; then
     log "avahi $type: $(grep -c '^=' <<<"$raw") resolved"
@@ -160,7 +166,7 @@ cmd_status() {
     --argjson avahi "$(have avahi-browse && echo true || echo false)" \
     --argjson qrencode "$(have qrencode && echo true || echo false)" \
     --argjson hyprctl "$(have hyprctl && echo true || echo false)" \
-    --argjson avahiDaemon "$(avahi_daemon_active && echo true || echo false)" \
+    --argjson avahiDaemon "$(avahi_daemon_running && echo true || echo false)" \
     '{adb:$adb,scrcpy:$scrcpy,avahi:$avahi,qrencode:$qrencode,hyprctl:$hyprctl,avahiDaemon:$avahiDaemon}')
   devices=$(devices_json)
   connect=$(browse_json _adb-tls-connect._tcp)
@@ -511,11 +517,15 @@ cmd_stop() {
 
 # Install what is missing in a floating terminal, where sudo can prompt. The
 # panel's status polling notices when it is done. No jq: it may be what is missing.
+#
+# This never touches systemd. The plugin stays opt-in about avahi-daemon — the
+# LAN-discovery helper (`browse`) works whenever avahi-browse is on $PATH,
+# regardless of whether the daemon is active. Users who want LAN auto-discovery
+# enable the daemon themselves (see README → "Optional: enable avahi-daemon").
 cmd_install() {
   local pkgs steps=()
   mapfile -t pkgs < <(missing_packages)
   (( ${#pkgs[@]} )) && steps+=("omarchy-pkg-add ${pkgs[*]}")
-  avahi_daemon_active || steps+=("sudo systemctl enable --now avahi-daemon.service")
   if (( ${#steps[@]} == 0 )); then
     printf '{"ok":true,"launched":false}\n'
     return
@@ -532,6 +542,23 @@ cmd_install() {
   log "install: $script"
   setsid -f "$launcher" "$script" >/dev/null 2>&1
   printf '{"ok":true,"launched":true,"steps":%s}\n' "$(json_strings "${steps[@]}")"
+}
+
+# Open a floating terminal with the exact `systemctl enable --now avahi-daemon`
+# line pre-filled, so the user can run it themselves. This is the user-facing
+# entry point for enabling LAN discovery — the plugin itself never enables
+# avahi-daemon.
+cmd_enable_avahi() {
+  local launcher=omarchy-launch-floating-terminal-with-presentation
+  if ! have "$launcher"; then
+    log "error: $launcher not found"
+    printf '{"ok":false,"error":"%s not found"}\n' "$launcher"
+    exit 1
+  fi
+  local script="sudo systemctl enable --now avahi-daemon"
+  log "enable-avahi: $script"
+  setsid -f "$launcher" "$script" >/dev/null 2>&1
+  printf '{"ok":true,"launched":true}\n'
 }
 
 # ---------------------------------------------------------------------- main
@@ -552,5 +579,6 @@ case $cmd in
   undock) cmd_undock "$@" ;;
   stop) cmd_stop "$@" ;;
   install) cmd_install "$@" ;;
+  enable-avahi) cmd_enable_avahi "$@" ;;
   *) json_error "unknown command: $cmd" ;;
 esac

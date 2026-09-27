@@ -228,7 +228,7 @@ Panel {
               width: parent.width
               text: (phone.missing.length > 0 ? "Missing packages: " + phone.missing.join(", ") : "") +
                     (phone.missing.length > 0 && !phone.deps.avahiDaemon ? "\n" : "") +
-                    (phone.deps.avahiDaemon ? "" : "avahi-daemon is not running (needed for Wi-Fi discovery)")
+                    (phone.deps.avahiDaemon ? "" : "Optional: enable avahi-daemon for faster LAN discovery.\nRun `sudo systemctl enable --now avahi-daemon` in any terminal.")
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -237,13 +237,15 @@ Panel {
             Button {
               width: parent.width
               leftAlign: true
-              text: phone.missing.length > 0 ? "Install missing packages" : "Start avahi-daemon"
+              text: phone.missing.length > 0 ? "Install missing packages" : "Open terminal to enable avahi-daemon"
               iconText: "󰏗"
-              tooltipText: "Open a terminal that runs omarchy pkg add and enables avahi-daemon  i"
+              tooltipText: phone.missing.length > 0
+                ? "Open a terminal that runs omarchy pkg add for the listed packages"
+                : "Open a terminal pre-filled with `sudo systemctl enable --now avahi-daemon`"
               enabled: !phone.busy
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: phone.installDeps()
+              onClicked: phone.missing.length > 0 ? phone.installDeps() : phone.enableAvahi()
             }
           }
 

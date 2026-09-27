@@ -218,6 +218,10 @@ Item {
     runAction([helperPath(), "install"], "Installing in a terminal; this panel updates when it is done")
   }
 
+  function enableAvahi() {
+    runAction([helperPath(), "enable-avahi"], "Opening a terminal to enable avahi-daemon for LAN discovery")
+  }
+
   // ------------------------------------------------------------- mirror
 
   function mirrorArgs() {
