@@ -257,6 +257,59 @@ assert_not_logged "hyprctl" "window mode leaves Hyprland alone"
 out=$(SCRCPY_FAIL=true "$HELPER" mirror --mode window 2>/dev/null || true)
 assert_jq '.ok == false and (.error | test("scrcpy exited"))' "$out" "a crashing scrcpy is reported with its last log line"
 
+# --------------------------------------- mirror_pid PID-reuse hardening
+#
+# A security review flagged that mirror_pid() only checked `kill -0`, which is
+# vulnerable to PID reuse: after our scrcpy exits the kernel can reassign the
+# PID to an unrelated process, and a subsequent stop() would signal that
+# unrelated process. The fix records the kernel-issued starttime (clock ticks
+# since boot, from /proc/<pid>/stat field 22) at launch and verifies it on
+# every liveness check. cmd_stop additionally uses a narrow pgrep over the
+# argv prefix recorded in the state file as a fallback when the recorded PID
+# itself is gone.
+"$HELPER" mirror --mode window >/dev/null
+recorded_pid=$(jq -r '.pid' "$XDG_STATE_HOME/omadroidctrl/mirror.json")
+recorded_starttime=$(jq -r '.starttime' "$XDG_STATE_HOME/omadroidctrl/mirror.json")
+recorded_argv=$(jq -r '.argv' "$XDG_STATE_HOME/omadroidctrl/mirror.json")
+[[ $recorded_pid =~ ^[0-9]+$ ]] || fail "mirror state must carry a numeric PID"
+[[ $recorded_starttime =~ ^[0-9]+$ ]] || fail "mirror state must carry starttime"
+[[ -n $recorded_argv && $recorded_argv == *"scrcpy"* ]] || fail "mirror state must carry the recorded argv"
+
+# status reports the running mirror (PID matches).
+assert_jq '.mirror.running and (.mirror.pid == '"$recorded_pid"')' "$("$HELPER" status)" \
+  "status reports the mirror running with the recorded PID"
+
+# While scrcpy is alive, /proc/<pid>/stat field 22 (starttime) must match.
+live_starttime=$(awk '{ for (i = 44; i <= NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit } }' \
+  "/proc/$recorded_pid/stat")
+[[ -n $live_starttime && $live_starttime == "$recorded_starttime" ]] \
+  || fail "live starttime ($live_starttime) must equal recorded starttime ($recorded_starttime)"
+
+# Simulate PID reuse: overwrite the recorded starttime to a bogus value and
+# confirm mirror_pid() drops the state file instead of treating the stale PID
+# as ours. This is the exact attack the reviewer flagged.
+fake_starttime=999999999
+jq --argjson s "$fake_starttime" '.starttime = $s' "$XDG_STATE_HOME/omadroidctrl/mirror.json" \
+  >"$XDG_STATE_HOME/omadroidctrl/mirror.json.next" && mv "$XDG_STATE_HOME/omadroidctrl/mirror.json.next" "$XDG_STATE_HOME/omadroidctrl/mirror.json"
+[[ ! -f $XDG_STATE_HOME/omadroidctrl/mirror.json ]] && fail "PID-reuse test setup failed"
+# After starttime mismatch, mirror_pid must return 1 and drop the state file.
+out=$("$HELPER" status 2>&1)
+[[ ! -f $XDG_STATE_HOME/omadroidctrl/mirror.json ]] \
+  || fail "state file must be dropped when starttime does not match (PID reuse)"
+assert_jq '.mirror.running == false' "$out" \
+  "status reports mirror NOT running after starttime mismatch"
+
+# Re-arm: launch again to give the next test a fresh state.
+"$HELPER" mirror --mode window >/dev/null
+recorded_pid=$(jq -r '.pid' "$XDG_STATE_HOME/omadroidctrl/mirror.json")
+[[ $recorded_pid =~ ^[0-9]+$ ]] || fail "second mirror launch must record a fresh PID"
+
+# stop() must cleanly tear down the mirror and clear the state.
+"$HELPER" stop >/dev/null
+[[ ! -f $XDG_STATE_HOME/omadroidctrl/mirror.json ]] || fail "stop() must clear the state file"
+assert_jq '.mirror.running == false' "$("$HELPER" status)" \
+  "status reports mirror not running after stop"
+
 # ------------------------------------------------------------- missing deps
 
 # A PATH holding only the coreutils the helper needs, so the real adb and
