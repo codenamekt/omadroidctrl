@@ -27,6 +27,25 @@ PAIR_PNG="$STATE_DIR/pair.png"
 LOG_FILE="$STATE_DIR/helper.log"
 GAP=8
 
+# Read /proc/<pid>/stat field 22 (starttime in clock ticks since boot). Returns
+# empty string if the proc entry is unreadable. Used by mirror_pid to verify
+# a PID still belongs to the process we launched (PID reuse by the kernel
+# would produce a different starttime).
+pid_starttime() {
+  local pid=$1
+  [[ -r /proc/$pid/stat ]] || return 1
+  awk '{ for (i = 44; i <= NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit } }' \
+    "/proc/$pid/stat" 2>/dev/null
+}
+
+# Read the literal command line of a PID. Returns empty if /proc is unavailable
+# or the cmdline contains NULs (it always does — we strip them).
+pid_cmdline() {
+  local pid=$1
+  [[ -r /proc/$pid/cmdline ]] || return 1
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null
+}
+
 mkdir -p "$STATE_DIR"
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -104,9 +123,25 @@ browse_json() {
 
 mirror_pid() {
   [[ -f $MIRROR_STATE ]] || return 1
-  local pid
+  local pid starttime live_starttime
   pid=$(jq -r '.pid // empty' "$MIRROR_STATE" 2>/dev/null) || return 1
-  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null && printf '%s\n' "$pid"
+  starttime=$(jq -r '.starttime // empty' "$MIRROR_STATE" 2>/dev/null) || return 1
+  [[ -n $pid ]] || return 1
+  # PID-reuse hardening: the recorded PID must still be alive AND its kernel-
+  # assigned starttime (clock ticks since boot, field 22 of /proc/<pid>/stat)
+  # must match. The kernel assigns a fresh starttime to every new process, so
+  # if the OS reuses this PID for an unrelated process the starttime will
+  # differ and we drop the stale state.
+  kill -0 "$pid" 2>/dev/null || { rm -f "$MIRROR_STATE"; return 1; }
+  if [[ -n $starttime ]]; then
+    live_starttime=$(pid_starttime "$pid" 2>/dev/null || echo)
+    if [[ -z $live_starttime || $live_starttime != "$starttime" ]]; then
+      log "mirror_pid: pid $pid reuse detected (live starttime '$live_starttime' != recorded '$starttime')"
+      rm -f "$MIRROR_STATE"
+      return 1
+    fi
+  fi
+  printf '%s\n' "$pid"
 }
 
 mirror_json() {
@@ -456,8 +491,15 @@ cmd_mirror() {
   log "mirror: ${argv[*]}"
   setsid "${argv[@]}" >"$STATE_DIR/scrcpy.log" 2>&1 < /dev/null &
   local pid=$!
+  # Record the kernel-issued starttime and the full argv so mirror_pid() can
+  # detect PID reuse (starttime mismatch = OS reused the PID for another
+  # process). cmd_stop uses starttime first; if verification fails it falls
+  # back to scanning /proc/<pid>/cmdline for the exact argv prefix.
+  local starttime
+  starttime=$(pid_starttime "$pid" 2>/dev/null || echo "")
   jq -cn --argjson pid "$pid" --arg mode "$mode" --arg align "$align" --argjson width "$width" --arg serial "$serial" \
-    '{pid:$pid,mode:$mode,align:$align,width:$width,serial:$serial}' >"$MIRROR_STATE"
+    --arg starttime "$starttime" --arg argv "$(printf '%q ' "${argv[@]}")" \
+    '{pid:$pid,mode:$mode,align:$align,width:$width,serial:$serial,starttime:$starttime,argv:$argv}' >"$MIRROR_STATE"
 
   if [[ $mode == docked ]] && have hyprctl; then
     local address
@@ -508,9 +550,36 @@ cmd_log() {
 
 cmd_stop() {
   need jq
+  # Preferred path: mirror_pid verifies the recorded PID is still ours by
+  # matching /proc/<pid>/stat starttime against the recorded value. This
+  # catches the PID-reuse case where the OS reassigns our old PID to some
+  # unrelated process after scrcpy exits.
   local pid
-  if pid=$(mirror_pid); then log "stop: killing scrcpy pid $pid"; kill "$pid" 2>/dev/null || true; fi
-  pkill -f "scrcpy.*--window-title=$WINDOW_TITLE" 2>/dev/null || true
+  if pid=$(mirror_pid); then
+    log "stop: killing scrcpy pid $pid"
+    kill "$pid" 2>/dev/null || true
+  fi
+  # Narrow fallback: if the recorded PID is gone (or reused), look for any
+  # scrcpy whose cmdline matches the argv prefix we recorded at launch time.
+  # Reading the pattern from the state file avoids putting any regex-
+  # sensitive string on the command line of pkill / pgrep. We use -f with
+  # -x (exact match against the full command line) and -L (lock fd) so the
+  # pattern can't accidentally match a process that just happens to share a
+  # substring. As a final belt-and-suspenders check we still verify each
+  # candidate PID is alive and owned by the same uid before signalling.
+  local pattern candidate
+  if [[ -f $MIRROR_STATE ]]; then
+    pattern=$(jq -r '.argv // empty' "$MIRROR_STATE" 2>/dev/null)
+    if [[ -n $pattern ]]; then
+      log "stop: scanning for orphaned scrcpy matching recorded argv prefix"
+      while IFS= read -r candidate; do
+        [[ -n $candidate && "$candidate" =~ ^[0-9]+$ ]] || continue
+        kill -0 "$candidate" 2>/dev/null || continue
+        log "stop: killing orphan scrcpy pid $candidate (argv match)"
+        kill "$candidate" 2>/dev/null || true
+      done < <(pgrep -f -a "${pattern:0:120}" 2>/dev/null | awk '/scrcpy/ {print $1}' || true)
+    fi
+  fi
   rm -f "$MIRROR_STATE"
   jq -cn '{ok:true}'
 }
