@@ -17,20 +17,6 @@ realistic CLI install output.
 
 Direct link: [docs/screenshots/teaser/omadroidctrl_teaser_1080p.mp4](docs/screenshots/teaser/omadroidctrl_teaser_1080p.mp4)
 
-Still frames:
-
-| Scene | Still |
-|---|---|
-| Hero intro | ![hero](docs/screenshots/teaser/00_hero_intro.jpg) |
-| Scan to Screen (live scrcpy) | ![scan to screen](docs/screenshots/teaser/01_scan_to_screen.jpg) |
-| Terminal install outro | ![terminal install](docs/screenshots/teaser/02_terminal_install.jpg) |
-| Scan, Don't Type | ![scan dont type](docs/screenshots/teaser/03_scan_dont_type.jpg) |
-| Tailnet side-by-side | ![tailnet side-by-side](docs/screenshots/teaser/04_tailnet_side_by_side.jpg) |
-| Tailnet highlight callout | ![tailnet highlight](docs/screenshots/teaser/05_tailnet_highlight.jpg) |
-
-<!-- TODO screenshot docs/screenshots/mirror.png: the scrcpy window tiled next to a terminal, bar icon lit -->
-*Screenshot of the mirror window coming soon.*
-
 ## Why you want this
 
 - **Scan, don't type.** The plugin shows a QR code; your phone's *Pair device
@@ -195,7 +181,3 @@ tests/manifest-test.sh   # the checks omarchy plugin validate enforces
 tests/helper-test.sh     # the helper against stubbed adb, scrcpy, avahi, qrencode, hyprctl
 tests/source-test.sh     # contracts between Panel.qml, Service.qml and the helper
 ```
-
-## License
-
-MIT. See [LICENSE](LICENSE).
