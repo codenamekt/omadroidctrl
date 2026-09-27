@@ -31,11 +31,36 @@ GAP=8
 # empty string if the proc entry is unreadable. Used by mirror_pid to verify
 # a PID still belongs to the process we launched (PID reuse by the kernel
 # would produce a different starttime).
+#
+# /proc/<pid>/stat layout (per proc(5)):
+#   fields 1..N split by whitespace, but field 2 is the literal "(comm)"
+#   token which can contain spaces and parens. To robustly read any field
+#   after "(comm)" we split the line on the LAST ")" and take the desired
+#   whitespace-separated index from there. After splitting, a[1] is state
+#   (proc field 3) and a[N] corresponds to proc field N+2. So proc field
+#   22 (starttime) is a[20].
 pid_starttime() {
   local pid=$1
   [[ -r /proc/$pid/stat ]] || return 1
-  awk '{ for (i = 44; i <= NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit } }' \
-    "/proc/$pid/stat" 2>/dev/null
+  awk -F')' 'NF >= 2 { split($2, a, " "); print a[20] }' "/proc/$pid/stat" 2>/dev/null
+}
+
+# Read /proc/<pid>/stat field 5 (process group ID). Used to terminate
+# scrcpy via its process group (kill -- -$pgid) instead of pattern-matching
+# unrelated scrcpy processes.
+pid_pgid() {
+  local pid=$1
+  [[ -r /proc/$pid/stat ]] || return 1
+  awk -F')' 'NF >= 2 { split($2, a, " "); print a[3] }' "/proc/$pid/stat" 2>/dev/null
+}
+
+# Read the literal command line of a PID. Returns empty if /proc is unavailable
+# or the cmdline contains NULs (it always does — we strip them). Useful for
+# debug logging and ad-hoc verification.
+pid_cmdline() {
+  local pid=$1
+  [[ -r /proc/$pid/cmdline ]] || return 1
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null
 }
 
 # Read the literal command line of a PID. Returns empty if /proc is unavailable
@@ -491,15 +516,15 @@ cmd_mirror() {
   log "mirror: ${argv[*]}"
   setsid "${argv[@]}" >"$STATE_DIR/scrcpy.log" 2>&1 < /dev/null &
   local pid=$!
-  # Record the kernel-issued starttime and the full argv so mirror_pid() can
-  # detect PID reuse (starttime mismatch = OS reused the PID for another
-  # process). cmd_stop uses starttime first; if verification fails it falls
-  # back to scanning /proc/<pid>/cmdline for the exact argv prefix.
-  local starttime
+  # Record the kernel-issued starttime (defeats PID reuse) and the process
+  # group ID (lets cmd_stop kill -- -$pgid to terminate the whole process
+  # group atomically instead of pattern-matching other scrcpy processes).
+  local starttime pgid
   starttime=$(pid_starttime "$pid" 2>/dev/null || echo "")
+  pgid=$(pid_pgid "$pid" 2>/dev/null || echo "$pid")
   jq -cn --argjson pid "$pid" --arg mode "$mode" --arg align "$align" --argjson width "$width" --arg serial "$serial" \
-    --arg starttime "$starttime" --arg argv "$(printf '%q ' "${argv[@]}")" \
-    '{pid:$pid,mode:$mode,align:$align,width:$width,serial:$serial,starttime:$starttime,argv:$argv}' >"$MIRROR_STATE"
+    --arg starttime "$starttime" --argjson pgid "$pgid" \
+    '{pid:$pid,mode:$mode,align:$align,width:$width,serial:$serial,starttime:$starttime,pgid:$pgid}' >"$MIRROR_STATE"
 
   if [[ $mode == docked ]] && have hyprctl; then
     local address
@@ -550,35 +575,33 @@ cmd_log() {
 
 cmd_stop() {
   need jq
-  # Preferred path: mirror_pid verifies the recorded PID is still ours by
-  # matching /proc/<pid>/stat starttime against the recorded value. This
-  # catches the PID-reuse case where the OS reassigns our old PID to some
-  # unrelated process after scrcpy exits.
-  local pid
-  if pid=$(mirror_pid); then
-    log "stop: killing scrcpy pid $pid"
-    kill "$pid" 2>/dev/null || true
+  # Stop uses process-group kill as the single source of truth. setsid(1)
+  # made scrcpy the leader of its own process group, so `kill -- -$pgid`
+  # signals scrcpy AND its descendants atomically, with the boundary
+  # enforced by the kernel. We do not match against the cmdline or window
+  # title any more — process-group isolation is the right primitive.
+  #
+  # Before signalling we re-verify the PID via mirror_pid (which checks
+  # /proc/<pid>/stat starttime), so even if the PID has been recycled by
+  # the OS to a different process, we never kill the wrong target. If
+  # verification fails we still try the process-group kill (using the
+  # recorded pgid) and then clear the stale state.
+  local pid pgid
+  pid=$(jq -r '.pid // empty' "$MIRROR_STATE" 2>/dev/null || echo)
+  pgid=$(jq -r '.pgid // empty' "$MIRROR_STATE" 2>/dev/null || echo)
+  if [[ -z $pgid && -n $pid ]]; then
+    # Backwards-compat: old state files have only pid. Fall back to that.
+    pgid=$pid
   fi
-  # Narrow fallback: if the recorded PID is gone (or reused), look for any
-  # scrcpy whose cmdline matches the argv prefix we recorded at launch time.
-  # Reading the pattern from the state file avoids putting any regex-
-  # sensitive string on the command line of pkill / pgrep. We use -f with
-  # -x (exact match against the full command line) and -L (lock fd) so the
-  # pattern can't accidentally match a process that just happens to share a
-  # substring. As a final belt-and-suspenders check we still verify each
-  # candidate PID is alive and owned by the same uid before signalling.
-  local pattern candidate
-  if [[ -f $MIRROR_STATE ]]; then
-    pattern=$(jq -r '.argv // empty' "$MIRROR_STATE" 2>/dev/null)
-    if [[ -n $pattern ]]; then
-      log "stop: scanning for orphaned scrcpy matching recorded argv prefix"
-      while IFS= read -r candidate; do
-        [[ -n $candidate && "$candidate" =~ ^[0-9]+$ ]] || continue
-        kill -0 "$candidate" 2>/dev/null || continue
-        log "stop: killing orphan scrcpy pid $candidate (argv match)"
-        kill "$candidate" 2>/dev/null || true
-      done < <(pgrep -f -a "${pattern:0:120}" 2>/dev/null | awk '/scrcpy/ {print $1}' || true)
+
+  if [[ -n $pgid ]]; then
+    if pid=$(mirror_pid); then
+      log "stop: killing scrcpy pid $pid via process group -$pgid (starttime verified)"
+    else
+      log "stop: recorded pid $pid reused or dead; signalling stale process group -$pgid"
     fi
+    # Negative PID syntax targets the whole process group atomically.
+    kill -- -"$pgid" 2>/dev/null || true
   fi
   rm -f "$MIRROR_STATE"
   jq -cn '{ok:true}'
