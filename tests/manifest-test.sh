@@ -9,7 +9,7 @@ jq -e '.schemaVersion == 1' "$M" >/dev/null || fail "schemaVersion must be 1"
 for f in id name version author description kinds entryPoints license; do
   jq -e --arg f "$f" 'has($f)' "$M" >/dev/null || fail "missing $f"
 done
-jq -e '.id == "codenamekt.omadroidctrl" and (.id | startswith("omarchy.") | not)' "$M" >/dev/null || fail "id"
+jq -e '.id == "io.github.codenamekt.omadroidctrl" and (.id | startswith("omarchy.") | not)' "$M" >/dev/null || fail "id"
 jq -e '.kinds == ["bar-widget"] and .entryPoints.barWidget == "Panel.qml"' "$M" >/dev/null || fail "kinds/entryPoints"
 [[ -f "$ROOT/Panel.qml" ]] || fail "entry point Panel.qml missing"
 jq -e '.barWidget.defaultSection == "right"' "$M" >/dev/null || fail "defaultSection"

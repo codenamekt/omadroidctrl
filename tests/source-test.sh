@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 contains() { grep -qF -- "$2" "$ROOT/$1" || fail "$1: $3"; }
 
-contains Panel.qml 'moduleName: "codenamekt.omadroidctrl"' "panel module name must match the manifest id"
-contains Panel.qml 'ipcTarget: "codenamekt.omadroidctrl"' "ipc target must match the manifest id"
+contains Panel.qml 'moduleName: "io.github.codenamekt.omadroidctrl"' "panel module name must match the manifest id"
+contains Panel.qml 'ipcTarget: "io.github.codenamekt.omadroidctrl"' "ipc target must match the manifest id"
 contains Panel.qml 'manageIpc: false' "panel must own its IpcHandler to expose mirror/pair/connect"
 for fn in 'function mirror()' 'function stop()' 'function toggleMirror()' 'function pair()' 'function connect()' 'function disconnect()' 'function status()'; do
   contains Panel.qml "$fn" "IPC handler is missing $fn"

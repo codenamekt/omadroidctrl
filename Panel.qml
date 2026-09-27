@@ -10,8 +10,8 @@ import qs.Ui
 // or stop the mirror, right-click for settings.
 Panel {
   id: root
-  moduleName: "codenamekt.omadroidctrl"
-  ipcTarget: "codenamekt.omadroidctrl"
+  moduleName: "io.github.codenamekt.omadroidctrl"
+  ipcTarget: "io.github.codenamekt.omadroidctrl"
   manageIpc: false
 
   property bool settingsOpen: false

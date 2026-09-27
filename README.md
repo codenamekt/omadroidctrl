@@ -47,12 +47,12 @@ Skipped the first line? The panel's **Setup** section lists what is missing and
 in a floating terminal.
 
 The widget appears at the right of the bar. Move it with
-`omarchy bar move codenamekt.omadroidctrl --section center`.
+`omarchy bar move io.github.codenamekt.omadroidctrl --section center`.
 
 ## Uninstall
 
 ```bash
-omarchy plugin remove codenamekt.omadroidctrl   # disables it and deletes the clone
+omarchy plugin remove io.github.codenamekt.omadroidctrl   # disables it and deletes the clone
 rm -rf ~/.local/state/omadroidctrl              # helper log, pairing QR, mirror state
 ```
 
@@ -159,12 +159,12 @@ Common causes:
 Every action is available over the shell's IPC, so you can bind it:
 
 ```bash
-omarchy-shell codenamekt.omadroidctrl toggleMirror
-omarchy-shell codenamekt.omadroidctrl pair
-omarchy-shell codenamekt.omadroidctrl connect        # Wi-Fi
-omarchy-shell codenamekt.omadroidctrl connectTailnet
-omarchy-shell codenamekt.omadroidctrl disconnect
-omarchy-shell codenamekt.omadroidctrl toggle         # the panel
+omarchy-shell io.github.codenamekt.omadroidctrl toggleMirror
+omarchy-shell io.github.codenamekt.omadroidctrl pair
+omarchy-shell io.github.codenamekt.omadroidctrl connect        # Wi-Fi
+omarchy-shell io.github.codenamekt.omadroidctrl connectTailnet
+omarchy-shell io.github.codenamekt.omadroidctrl disconnect
+omarchy-shell io.github.codenamekt.omadroidctrl toggle         # the panel
 ```
 
 ## How it works
