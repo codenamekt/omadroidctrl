@@ -31,28 +31,30 @@ GAP=8
 # /proc/<pid>/stat layout (per proc(5)):
 #   field 1: pid
 #   field 2: (comm) — can contain spaces and parens if a thread was renamed
-#             via prctl(PR_SET_NAME), e.g. "(worker)1)" — the closing ")" is
-#             the LAST ")" on the line, not the first.
+#             via prctl(PR_SET_NAME), e.g. "(weird)name)" — the closing ")"
+#             is the LAST ")" on the line, not the first.
 #   field 3+: state, ppid, pgrp, ..., starttime (field 22).
 #
-# To read any post-comm field robustly we strip everything up to and including
-# the LAST ")" and take the requested whitespace-separated index from there.
-# This is correct even when (comm) contains ")" characters.
+# To read any post-comm field robustly we find the LAST ")" (by iterating
+# from the end of the line) and take the requested whitespace-separated
+# index from the tokens that follow it. `awk`'s `index()` returns the FIRST
+# occurrence, which is wrong for comms containing ")".
 #
 # Usage: pid_stat_field <pid> <1-based proc field index after comm>
 pid_stat_field() {
   local pid=$1 want_field=$2
   [[ -r /proc/$pid/stat ]] || return 1
-  # Strip everything up to and including the LAST ")" then take field $want_field.
-  awk -v want="$want_field" '{
-    n = index($0, ")")
-    if (n == 0) { exit 1 }
-    rest = substr($0, n + 1)
-    i = 1
-    nf = split(rest, a, " ")
-    for (j = 1; j <= nf; j++) if (a[j] != "") a[i++] = a[j]
-    if (want >= 1 && want < i) print a[want]
-  }' "/proc/$pid/stat" 2>/dev/null
+  awk -v want="$want_field" '
+    {
+      n = length($0)
+      last = 0
+      for (i = n; i >= 1; i--) if (substr($0, i, 1) == ")") { last = i; break }
+      if (last == 0) exit 1
+      rest = substr($0, last + 1)
+      i = 0
+      nf = split(rest, a, " ")
+      for (j = 1; j <= nf; j++) if (a[j] != "") { i++; if (i == want) { print a[j]; exit } }
+    }' "/proc/$pid/stat" 2>/dev/null
 }
 
 # Read /proc/<pid>/stat field 22 (starttime in clock ticks since boot). Used
@@ -171,14 +173,18 @@ mirror_pid() {
   # must match. The kernel assigns a fresh starttime to every new process, so
   # if the OS reuses this PID for an unrelated process the starttime will
   # differ and we drop the stale state.
+  #
+  # We refuse to verify if the state file has no recorded starttime: older
+  # versions of this helper would record an empty starttime when /proc
+  # couldn't be read at launch, which would silently bypass this check.
+  # Treat missing starttime as a verification failure.
+  [[ -n $starttime ]] || { log "mirror_pid: state file has no recorded starttime; refusing to verify"; return 1; }
   kill -0 "$pid" 2>/dev/null || { rm -f "$MIRROR_STATE"; return 1; }
-  if [[ -n $starttime ]]; then
-    live_starttime=$(pid_starttime "$pid" 2>/dev/null || echo)
-    if [[ -z $live_starttime || $live_starttime != "$starttime" ]]; then
-      log "mirror_pid: pid $pid reuse detected (live starttime '$live_starttime' != recorded '$starttime')"
-      rm -f "$MIRROR_STATE"
-      return 1
-    fi
+  live_starttime=$(pid_starttime "$pid" 2>/dev/null || echo)
+  if [[ -z $live_starttime || $live_starttime != "$starttime" ]]; then
+    log "mirror_pid: pid $pid reuse detected (live starttime '$live_starttime' != recorded '$starttime')"
+    rm -f "$MIRROR_STATE"
+    return 1
   fi
   printf '%s\n' "$pid"
 }
@@ -533,9 +539,22 @@ cmd_mirror() {
   # Record the kernel-issued starttime (defeats PID reuse) and the process
   # group ID (lets cmd_stop kill -- -$pgid to terminate the whole process
   # group atomically instead of pattern-matching other scrcpy processes).
+  # We refuse to launch if we can't read the starttime: without it, the
+  # starttime verification in mirror_pid would be skipped, falling back to
+  # the original kill -0 check that is vulnerable to PID reuse. Failing
+  # closed here is the safer choice — if /proc is unreadable right now,
+  # nothing about this mirror is safe to track.
   local starttime pgid
   starttime=$(pid_starttime "$pid" 2>/dev/null || echo "")
-  pgid=$(pid_pgid "$pid" 2>/dev/null || echo "$pid")
+  pgid=$(pid_pgid "$pid" 2>/dev/null || echo "")
+  if [[ -z $starttime || -z $pgid ]]; then
+    log "mirror: failed to read starttime/pgid for pid $pid; aborting"
+    kill -- -"$pgid" 2>/dev/null || true
+    wait $pid 2>/dev/null || true
+    jq -cn --arg error "could not read /proc/$pid/stat (missing starttime or pgid); mirror aborted for safety" \
+      '{ok:false,error:$error}'
+    exit 1
+  fi
   jq -cn --argjson pid "$pid" --arg mode "$mode" --arg align "$align" --argjson width "$width" --arg serial "$serial" \
     --arg starttime "$starttime" --argjson pgid "$pgid" \
     '{pid:$pid,mode:$mode,align:$align,width:$width,serial:$serial,starttime:$starttime,pgid:$pgid}' >"$MIRROR_STATE"
