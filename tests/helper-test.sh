@@ -335,61 +335,55 @@ assert_jq '.ok == true' "$out" \
 # The real scrcpy is still running (we never signalled it).
 kill -0 "$real_pid" 2>/dev/null \
   || fail "stop() with tampered state must NOT have killed the real scrcpy pid=$real_pid"
-kill -- -"$real_pgid" 2>/dev/null || true  # clean up the live scrcpy we left running
+if [[ -n ${real_pgid:-} && $real_pgid == "$real_pid" ]]; then
+  kill -- -"$real_pgid" 2>/dev/null || true  # clean up the live scrcpy we left running
+fi
+kill "$real_pid" 2>/dev/null || true
 sleep 0.2
 
 # ----------------------------------------- /proc/<pid>/stat field reader
 #
 # The proc(5) field 2 (comm) can contain spaces and parens if a thread was
 # renamed via prctl(PR_SET_NAME). Our parser must find the LAST ')' on the
-# line, not the first. We test with a synthetic stat line where comm =
-# "weird)name" and proc field 22 (starttime) is a known sentinel value.
+# line, not the first. We exercise the helper's own pid_stat_field against
+# a synthetic stat line where comm = "weird)name" and proc field 22
+# (starttime) is a known sentinel value.
 
-# Reconstruct what the helper would see if a real process had its comm
-# set to "weird)name" (kernel prints "(weird)name)" with the closing paren
-# at the end of the comm token). 20 tokens follow: state, f4..f21, then
-# sentinel = starttime (proc field 22).
-SYNTHETIC_COMM="weird)name"
-SYNTHETIC_PID=12345
-SENTINEL=987654321
-SYNTHETIC_STAT_LINE="$SYNTHETIC_PID ($SYNTHETIC_COMM) S $(seq 4 21 | tr "\n" " " | sed "s/^/f/; s/$/ f21/") $SENTINEL"
-# Build cleanly
-SYNTHETIC_STAT_LINE="$SYNTHETIC_PID ($SYNTHETIC_COMM) S $(printf 'f%s ' $(seq 4 20)) f21 $SENTINEL"
-echo "synthetic line: $SYNTHETIC_STAT_LINE"
-# Inject into a fake /proc file by writing a temp file and feeding it
-# directly to the helper's parser via a sentinel PID. Since the helper
-# reads /proc/<pid>/stat, we mock that file via bind-mounting a temp
-# directory over /proc — too invasive for a unit test. Instead, test the
-# parser function in isolation by sourcing the helper and calling the
-# field reader on a known line via a stub /proc.
+# Kernel-emitted form: "12345 (weird)name) S ...". The closing ')' of the
+# (comm) token is the LAST ')' on the line. After it there are 21 tokens;
+# token #20 (1-based) is proc field 22 (starttime).
 TMP_PROC=$(mktemp -d)
+trap 'rm -rf "$sandbox" "$TMP_PROC"' EXIT
+SENTINEL=987654321
+SYNTHETIC_PID=12345
+SYNTHETIC_LINE="$SYNTHETIC_PID (weird)name) S $(printf 'f%s ' $(seq 4 21)) $SENTINEL 0 0 0"
 mkdir -p "$TMP_PROC/$SYNTHETIC_PID"
-printf '%s' "$SYNTHETIC_STAT_LINE" >"$TMP_PROC/$SYNTHETIC_PID/stat"
+printf '%s' "$SYNTHETIC_LINE" >"$TMP_PROC/$SYNTHETIC_PID/stat"
 
-# Extract the parser function from the helper and test it directly on the
-# synthetic line. Source the helper functions in a subshell.
-parser_test=$("$HELPER" 2>&1 || true)  # warm-up to load helpers
+# Sanity check the synthetic line is well-formed before testing the parser:
+# splitting on the LAST ')' and reading the 20th whitespace token should
+# yield $SENTINEL. If this fails, the test is broken, not the helper.
+after_last_close=$(echo "$SYNTHETIC_LINE" | sed 's/.*)//' | awk '{print $20}')
+[[ $after_last_close == "$SENTINEL" ]] \
+  || fail "test setup error: synthetic line did not put $SENTINEL at proc field 22 (got '$after_last_close')"
 
-# We can't easily test the in-helper pid_stat_field without reimplementing
-# its awk call here. Instead, we reproduce the awk call and assert the
-# correct value comes back.
-parser_out=$(
-  awk -v want=20 '
-    {
-      n = length($0)
-      last = 0
-      for (i = n; i >= 1; i--) if (substr($0, i, 1) == ")") { last = i; break }
-      if (last == 0) exit 1
-      rest = substr($0, last + 1)
-      i = 0
-      nf = split(rest, a, " ")
-      for (j = 1; j <= nf; j++) if (a[j] != "") { i++; if (i == want) { print a[j]; exit } }
-    }' <"$TMP_PROC/$SYNTHETIC_PID/stat"
-)
-[[ $parser_out == "$SENTINEL" ]] \
-  || fail "parser fails to read proc field 22 from (comm)=weird)name: got '$parser_out', expected '$SENTINEL'"
+# Call the helper's own pid_stat_field against the synthetic /proc. The
+# helper defines the function at top level (no main guard), and it accepts
+# the proc root as a third argument so callers — including tests — do not
+# have to bind-mount over /proc. We extract just the function definition
+# so the test runs without the rest of the helper's side effects.
+parsed=$(bash -c '
+  set -e
+  sed -n "/^pid_stat_field()/,/^}\$/p" "$1" > /tmp/pid_stat_field_test.sh
+  source /tmp/pid_stat_field_test.sh
+  rm -f /tmp/pid_stat_field_test.sh
+  pid_stat_field "$2" "$3" "$4"
+' bash "$ROOT/omadroidctrl-helper" "$SYNTHETIC_PID" 20 "$TMP_PROC" < /dev/null)
+[[ $parsed == "$SENTINEL" ]] \
+  || fail "pid_stat_field failed on (comm)=weird)name: got '$parsed', expected '$SENTINEL'"
 rm -rf "$TMP_PROC"
-echo "parser correctly reads proc field 22 from a comm containing ')'"
+trap 'rm -rf "$sandbox"' EXIT
+echo "pid_stat_field correctly reads proc field 22 from a comm containing ')'"
 
 # ----------------------------------------------------------- cmd_mirror aborts
 #
@@ -421,6 +415,12 @@ out=$("$HELPER" mirror --mode window 2>&1 || true)
 # cmd_mirror must refuse the launch when starttime/pgid can't be recorded.
 assert_jq '.ok == false and (.error | test("starttime|pgid|stat"))' "$out" \
   "cmd_mirror must abort when /proc/<pid>/stat is unreadable"
+# Critical: NO state file should be left behind. Otherwise a subsequent
+# cmd_stop would see an empty starttime and rely on the older-state-file
+# guard instead of the launch-time guard, silently bypassing the
+# PID-reuse defence that cmd_mirror is supposed to enforce.
+[[ ! -f $XDG_STATE_HOME/omadroidctrl/mirror.json ]] \
+  || fail "cmd_mirror must NOT persist a state file when starttime/pgid is unreadable"
 
 # Restore the normal scrcpy stub for the remaining tests
 cat >"$sandbox/scrcpy" <<'STUB'

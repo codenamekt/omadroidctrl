@@ -40,10 +40,13 @@ GAP=8
 # index from the tokens that follow it. `awk`'s `index()` returns the FIRST
 # occurrence, which is wrong for comms containing ")".
 #
-# Usage: pid_stat_field <pid> <1-based proc field index after comm>
+# Usage: pid_stat_field <pid> <1-based proc field index after comm> [proc_root]
+# The optional third argument is the directory to read from; defaults to /proc.
+# Tests point it at a synthetic directory to exercise comm tokens that would
+# never appear on a real running process (e.g. "weird)name").
 pid_stat_field() {
-  local pid=$1 want_field=$2
-  [[ -r /proc/$pid/stat ]] || return 1
+  local pid=$1 want_field=$2 proc_root=${3:-/proc}
+  [[ -r $proc_root/$pid/stat ]] || return 1
   awk -v want="$want_field" '
     {
       n = length($0)
@@ -54,7 +57,7 @@ pid_stat_field() {
       i = 0
       nf = split(rest, a, " ")
       for (j = 1; j <= nf; j++) if (a[j] != "") { i++; if (i == want) { print a[j]; exit } }
-    }' "/proc/$pid/stat" 2>/dev/null
+    }' "$proc_root/$pid/stat" 2>/dev/null
 }
 
 # Read /proc/<pid>/stat field 22 (starttime in clock ticks since boot). Used
@@ -544,12 +547,27 @@ cmd_mirror() {
   # the original kill -0 check that is vulnerable to PID reuse. Failing
   # closed here is the safer choice — if /proc is unreadable right now,
   # nothing about this mirror is safe to track.
-  local starttime pgid
-  starttime=$(pid_starttime "$pid" 2>/dev/null || echo "")
-  pgid=$(pid_pgid "$pid" 2>/dev/null || echo "")
-  if [[ -z $starttime || -z $pgid ]]; then
+  #
+  # We wait briefly for setsid to transition into its own session (where
+  # pgid == pid). Before setsid() executes, child pid still shares the caller's
+  # process group; we must never record or signal the caller's group.
+  local starttime="" pgid="" my_pgid
+  my_pgid=$(pid_pgid "$$" 2>/dev/null || echo "")
+  for _ in $(seq 10); do
+    starttime=$(pid_starttime "$pid" 2>/dev/null || echo "")
+    pgid=$(pid_pgid "$pid" 2>/dev/null || echo "")
+    if [[ -n $starttime && -n $pgid && $pgid == "$pid" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+
+  if [[ -z $starttime || -z $pgid || $pgid != "$pid" ]]; then
     log "mirror: failed to read starttime/pgid for pid $pid; aborting"
-    kill -- -"$pgid" 2>/dev/null || true
+    if [[ -n $pgid && $pgid == "$pid" && $pgid != "$my_pgid" ]]; then
+      kill -- -"$pgid" 2>/dev/null || true
+    fi
+    kill "$pid" 2>/dev/null || true
     wait $pid 2>/dev/null || true
     jq -cn --arg error "could not read /proc/$pid/stat (missing starttime or pgid); mirror aborted for safety" \
       '{ok:false,error:$error}'
@@ -619,10 +637,12 @@ cmd_stop() {
   # signal the recorded process group. PGID reuse is unlikely in practice
   # (no auto-recycling by the kernel) but we still refuse to signal a
   # group ID whose owning process we can't verify — defensive correctness.
-  local pgid
+  # We also verify pgid is not our own process group before signalling.
+  local pgid my_pgid
   pgid=$(jq -r '.pgid // empty' "$MIRROR_STATE" 2>/dev/null || echo)
+  my_pgid=$(pid_pgid "$$" 2>/dev/null || echo "")
 
-  if [[ -n $pgid ]] && mirror_pid >/dev/null; then
+  if [[ -n $pgid && $pgid != "$my_pgid" ]] && mirror_pid >/dev/null; then
     log "stop: killing scrcpy via verified process group -$pgid"
     # Negative PID syntax targets the whole process group atomically.
     kill -- -"$pgid" 2>/dev/null || true
