@@ -313,6 +313,29 @@ recorded_pid=$(jq -r '.pid' "$XDG_STATE_HOME/omadroidctrl/mirror.json")
 assert_jq '.mirror.running == false' "$("$HELPER" status)" \
   "status reports mirror not running after stop"
 
+# If mirror_pid rejects the recorded PID (e.g. starttime mismatch), cmd_stop
+# must NOT signal the recorded PGID — PGID reuse is unlikely but defensive
+# correctness still requires we refuse to signal a group whose owning
+# process we cannot verify.
+"$HELPER" mirror --mode window >/dev/null
+real_pid=$(jq -r '.pid' "$XDG_STATE_HOME/omadroidctrl/mirror.json")
+real_pgid=$(jq -r '.pgid' "$XDG_STATE_HOME/omadroidctrl/mirror.json")
+fake_starttime=999999999
+jq --argjson s "$fake_starttime" '.starttime = $s' "$XDG_STATE_HOME/omadroidctrl/mirror.json" \
+  >"$XDG_STATE_HOME/omadroidctrl/mirror.json.next" && mv "$XDG_STATE_HOME/omadroidctrl/mirror.json.next" "$XDG_STATE_HOME/omadroidctrl/mirror.json"
+out=$("$HELPER" stop 2>&1)
+# The state file is dropped (status already cleared it). stop() must NOT
+# report any kill.
+[[ ! -f $XDG_STATE_HOME/omadroidctrl/mirror.json ]] \
+  || fail "stop() must clear the state file even after PID-reuse tampering"
+assert_jq '.ok == true' "$out" \
+  "stop() returns ok but does not signal the tampered recorded PID/PGID"
+# The real scrcpy is still running (we never signalled it).
+kill -0 "$real_pid" 2>/dev/null \
+  || fail "stop() with tampered state must NOT have killed the real scrcpy pid=$real_pid"
+kill -- -"$real_pgid" 2>/dev/null || true  # clean up the live scrcpy we left running
+sleep 0.2
+
 # ------------------------------------------------------------- missing deps
 
 # A PATH holding only the coreutils the helper needs, so the real adb and
